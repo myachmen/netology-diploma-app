@@ -43,6 +43,8 @@ jobs:
           images: |
             yamarkya/netology-diploma-app
             cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app
+          flavor: |
+            latest=false
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
