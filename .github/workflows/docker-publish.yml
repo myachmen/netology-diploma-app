@@ -8,6 +8,11 @@ on:
     tags:
       - 'v[0-9]*.[0-9]*.[0-9]*'
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the image built by this run (select a release tag)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -15,10 +20,30 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      release: ${{ steps.release.outputs.valid }}
 
     steps:
+      - name: Identify release tag
+        id: release
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF_TYPE" == tag && "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'valid=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'valid=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Pin the source to the selected push/dispatch ref's event commit.
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -50,6 +75,7 @@ jobs:
             type=semver,pattern={{version}}
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -57,3 +83,131 @@ jobs:
           provenance: false
           sbom: false
           tags: ${{ steps.meta.outputs.tags }}
+
+  # Hard-disabled until credentials are prepared and the user explicitly approves
+  # the temporary background SSH process. Remove the literal false only after
+  # that approval and review; neither variable grants approval by itself.
+  deploy:
+    needs: build-and-push
+    if: >-
+      false &&
+      needs['build-and-push'].result == 'success' &&
+      needs['build-and-push'].outputs.release == 'true' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.deploy)) &&
+      vars.CD_ENABLED == 'true' &&
+      vars.CD_SSH_TUNNEL_APPROVED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    concurrency:
+      group: diploma-app-production
+      cancel-in-progress: false
+    steps:
+      - name: Install verified kubectl v1.33.7
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || exit 1
+          download_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$download_dir"' EXIT
+          cd "$download_dir"
+          base_url='https://dl.k8s.io/release/v1.33.7/bin/linux/amd64'
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 120 --retry 2 \
+            --output kubectl "$base_url/kubectl"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 30 --retry 2 \
+            --output kubectl.sha256 "$base_url/kubectl.sha256"
+          checksum="$(cat kubectl.sha256)"
+          [[ "$checksum" =~ ^[0-9a-fA-F]{64}$ ]] || exit 1
+          printf '%s  kubectl\n' "$checksum" | sha256sum --check --strict
+          install_dir="$RUNNER_TEMP/diploma-cd-bin"
+          mkdir -p "$install_dir"
+          install -m 0755 kubectl "$install_dir/kubectl"
+          printf '%s\n' "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Deploy through a temporary SSH tunnel
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ needs['build-and-push'].outputs.digest }}
+          SSH_HOST: ${{ vars.CD_SSH_HOST }}
+          SSH_USER: ${{ vars.CD_SSH_USER }}
+          API_TLS_NAME: ${{ vars.CD_API_TLS_NAME }}
+          SSH_PRIVATE_KEY: ${{ secrets.CD_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.CD_SSH_KNOWN_HOSTS }}
+          KUBE_CA_B64: ${{ secrets.CD_KUBE_CA_B64 }}
+          KUBE_TOKEN: ${{ secrets.CD_KUBE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # No checkout or arbitrary kubeconfig: use only the deployer token and CA.
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$SSH_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
+          [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 1
+          [[ "$API_TLS_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
+          for name in SSH_PRIVATE_KEY SSH_KNOWN_HOSTS KUBE_CA_B64 KUBE_TOKEN; do
+            [[ -n "${!name}" ]] || { echo "Missing required credential: $name"; exit 1; }
+          done
+          umask 077
+          work_dir="$(mktemp -d)"
+          tunnel_pid=''
+          cleanup() {
+            if [[ -n "$tunnel_pid" ]]; then
+              kill "$tunnel_pid" 2>/dev/null || true
+              wait "$tunnel_pid" 2>/dev/null || true
+            fi
+            rm -rf -- "$work_dir"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          export CD_WORK_DIR="$work_dir"
+          export KUBECONFIG="$work_dir/kubeconfig"
+          python3 - <<'PYCONFIG'
+          import base64, json, os
+          from pathlib import Path
+          root = Path(os.environ["CD_WORK_DIR"])
+          base64.b64decode(os.environ["KUBE_CA_B64"], validate=True)
+          (root / "key").write_text(os.environ["SSH_PRIVATE_KEY"] + "\n")
+          (root / "known_hosts").write_text(os.environ["SSH_KNOWN_HOSTS"] + "\n")
+          config = {
+              "apiVersion": "v1", "kind": "Config",
+              "clusters": [{"name": "cd", "cluster": {
+                  "server": "https://127.0.0.1:6443",
+                  "certificate-authority-data": os.environ["KUBE_CA_B64"],
+                  "tls-server-name": os.environ["API_TLS_NAME"]}}],
+              "users": [{"name": "deployer", "user": {"token": os.environ["KUBE_TOKEN"]}}],
+              "contexts": [{"name": "cd", "context": {
+                  "cluster": "cd", "user": "deployer", "namespace": "default"}}],
+              "current-context": "cd"}
+          (root / "kubeconfig").write_text(json.dumps(config))
+          PYCONFIG
+          unset SSH_PRIVATE_KEY SSH_KNOWN_HOSTS KUBE_CA_B64 KUBE_TOKEN
+          # FUTURE ONLY: requires explicit user approval before enabling the gates.
+          ssh -F /dev/null -N -T \
+            -i "$work_dir/key" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
+            -o ForwardAgent=no -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$work_dir/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null \
+            -o ExitOnForwardFailure=yes -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            -L 127.0.0.1:6443:127.0.0.1:6443 \
+            "$SSH_USER@$SSH_HOST" &
+          tunnel_pid=$!
+          ready=false
+          for attempt in {1..15}; do
+            kill -0 "$tunnel_pid" 2>/dev/null || { echo 'SSH tunnel exited'; exit 1; }
+            if kubectl --request-timeout=5s -n default get deployment diploma-app -o name >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          [[ "$ready" == true ]] || { echo 'API/deployer readiness check failed'; exit 1; }
+          kubectl --request-timeout=30s -n default set image deployment/diploma-app \
+            "diploma-app=cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app@$IMAGE_DIGEST"
+          kubectl --request-timeout=30s -n default rollout status deployment/diploma-app --timeout=180s
