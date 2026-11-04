@@ -1,6 +1,7 @@
 """Offline contract for the static nginx application and its build context."""
 import argparse
 import re
+import tarfile
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -61,6 +62,14 @@ def check_context(root):
     if ignores != ["**", "!Dockerfile", "!index.html"]:
         raise ValueError("Build context must allow only Dockerfile and index.html")
     return version
+
+
+def write_context_archive(root, destination):
+    """Offline allowlist archive; validates inputs, does not emulate a Docker build."""
+    check_context(root)
+    with tarfile.open(destination, 'x') as archive:
+        for name in ('Dockerfile', 'index.html', '.dockerignore'):
+            archive.add(root / name, arcname=name, recursive=False)
 
 
 if __name__ == "__main__":

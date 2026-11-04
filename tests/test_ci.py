@@ -3,13 +3,31 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
 from ci.release import validate
-from ci.smoke import check_context
+from ci.smoke import check_context, check_html, write_context_archive
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def replace_once(text, old, new):
+    if old == new or text.count(old) != 1:
+        raise ValueError('Fixture must change exactly one existing marker')
+    return text.replace(old, new, 1)
+
+
+def copy_context(destination, version):
+    (destination / 'ci').mkdir()
+    for name in ('index.html', 'Dockerfile', '.dockerignore', 'ci/VERSION'):
+        shutil.copyfile(ROOT / name, destination / name)
+    current = (ROOT / 'ci/VERSION').read_text().strip()
+    if current != version:
+        path = destination / 'index.html'
+        path.write_text(replace_once(path.read_text(), f'Version: {current}', f'Version: {version}'))
+    (destination / 'ci/VERSION').write_text(version + '\n')
 
 
 class ApplicationContract(unittest.TestCase):
@@ -17,8 +35,12 @@ class ApplicationContract(unittest.TestCase):
         self.assertEqual(check_context(ROOT), (ROOT / "ci/VERSION").read_text().strip())
 
     def test_broken_fixtures_fail_cli(self):
+        for version in dict.fromkeys(((ROOT / 'ci/VERSION').read_text().strip(), '1.0.1')):
+            self.check_version_fixtures(version)
+
+    def check_version_fixtures(self, version):
         mutations = {
-            "version": ("index.html", "Version: 1.0.0", "Version: 99.0.0"),
+            "version": ("index.html", f"Version: {version}", f"Version: {version}-broken"),
             "heading": ("index.html", "<h1>Netology DevOps Diploma</h1>", "<h1>Wrong application</h1>"),
             "success": ("index.html", "Application is running successfully!", "Application failed!"),
             "copy": ("Dockerfile", "COPY index.html", "COPY ."),
@@ -27,15 +49,31 @@ class ApplicationContract(unittest.TestCase):
         for label, (file, old, new) in mutations.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 fixture = Path(tmp)
-                (fixture / "ci").mkdir()
-                for name in ("index.html", "Dockerfile", ".dockerignore", "ci/VERSION"):
-                    shutil.copyfile(ROOT / name, fixture / name)
+                copy_context(fixture, version)
+                self.assertEqual(check_context(fixture), version)
                 path = fixture / file
-                path.write_text(path.read_text().replace(old, new))
+                path.write_text(replace_once(path.read_text(), old, new))
                 run = subprocess.run([sys.executable, str(ROOT / "ci/smoke.py"), tmp],
                                      capture_output=True, text=True, timeout=10)
                 self.assertEqual(run.returncode, 1)
                 self.assertIn("smoke FAIL", run.stderr)
+
+    def test_fixture_refuses_missing_duplicate_or_unchanged_marker(self):
+        for text, old, new in [('hello', 'absent', 'new'), ('x x', 'x', 'new'), ('x', 'x', 'x')]:
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                replace_once(text, old, new)
+
+    def test_offline_build_context_archives_only_allowed_inputs(self):
+        for version in dict.fromkeys(((ROOT / 'ci/VERSION').read_text().strip(), '1.0.1')):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmp:
+                fixture = Path(tmp)
+                copy_context(fixture, version)
+                (fixture / '.env').write_text('synthetic-excluded-tripwire')
+                output = fixture / 'context.tar'
+                write_context_archive(fixture, output)
+                with tarfile.open(output) as archive:
+                    self.assertEqual(archive.getnames(), ['Dockerfile', 'index.html', '.dockerignore'])
+                    check_html(archive.extractfile('index.html').read().decode(), version)
 
 
 class ReleaseContract(unittest.TestCase):

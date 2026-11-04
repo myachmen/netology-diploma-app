@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - feature/diploma-ci-cd-prep-137
+      - feature/diploma-ci-cd-fixes-139
     tags:
       - 'v[0-9]*.[0-9]*.[0-9]*'
   pull_request:
@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified upstream ref
         with:
           persist-credentials: false
       - name: Offline application and release security tests
@@ -47,7 +47,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified upstream ref
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -81,16 +81,16 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3, verified upstream ref
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3, verified upstream ref
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to Yandex Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3, verified upstream ref
         with:
           registry: cr.yandex
           username: json_key
@@ -98,7 +98,7 @@ jobs:
 
       - name: Generate Docker image tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5, verified upstream ref
         with:
           images: |
             yamarkya/netology-diploma-app
@@ -117,7 +117,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6, verified upstream ref
         with:
           context: .
           push: true
@@ -135,6 +135,7 @@ jobs:
       github.repository == 'myachmen/netology-diploma-app' &&
       github.event_name == 'push' && github.ref_type == 'tag' &&
       github.run_attempt == 1 &&
+      github.ref == vars.CD_EXPECTED_REF && github.sha == vars.CD_EXPECTED_SHA &&
       needs.test.result == 'success' &&
       needs['build-and-push'].result == 'success' &&
       needs['build-and-push'].outputs.release == 'true' &&
@@ -149,7 +150,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout trusted release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified upstream ref
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -165,11 +166,11 @@ jobs:
           base_url='https://dl.k8s.io/release/v1.33.7/bin/linux/amd64'
           curl --fail --silent --show-error --location \
             --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --connect-timeout 15 --max-time 120 --retry 2 \
+            --connect-timeout 15 --max-time 60 --retry 1 --retry-max-time 120 \
             --output kubectl "$base_url/kubectl"
           curl --fail --silent --show-error --location \
             --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --connect-timeout 15 --max-time 30 --retry 2 \
+            --connect-timeout 10 --max-time 15 --retry 1 --retry-max-time 30 \
             --output kubectl.sha256 "$base_url/kubectl.sha256"
           checksum="$(cat kubectl.sha256)"
           [[ "$checksum" =~ ^[0-9a-fA-F]{64}$ ]] || exit 1
@@ -182,6 +183,10 @@ jobs:
       - name: Deploy same-run immutable digest (DISABLED job)
         shell: bash
         env:
+          CD_PROFILE: PREPARATION
+          CD_EXPECTED_REF: ${{ vars.CD_EXPECTED_REF }}
+          CD_EXPECTED_SHA: ${{ vars.CD_EXPECTED_SHA }}
+          CD_EXPECTED_AUDIENCE: ${{ vars.CD_EXPECTED_AUDIENCE }}
           BUILD_RESULT: ${{ needs['build-and-push'].result }}
           IMAGE_DIGEST: ${{ needs['build-and-push'].outputs.digest }}
           SOURCE_SHA: ${{ needs['build-and-push'].outputs.source_sha }}

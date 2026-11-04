@@ -2,22 +2,6 @@
 # FUTURE ONLY: workflow job remains literal false &&. No automatic retry/rollback.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-python3 ci/release.py
-[[ "${CD_ENABLED:-}" == true && "${CD_SSH_TUNNEL_APPROVED:-}" == true ]] || exit 1
-[[ "${SSH_HOST:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
-[[ "${SSH_USER:-}" == cd-tunnel ]] || exit 1
-[[ "${API_TLS_NAME:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
-# Validate URL without shell interpolation or credentials, redirects or proxy bypass of trust.
-python3 - <<'PY'
-import os
-from urllib.parse import urlsplit
-url = urlsplit(os.environ.get('APP_URL', ''))
-if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password or url.query or url.fragment or url.path != '/':
-    raise SystemExit('Invalid application URL; expected an approved root URL without credentials')
-PY
-for name in SSH_PRIVATE_KEY SSH_KNOWN_HOSTS KUBE_CA_B64 KUBE_TOKEN; do
-  [[ -n "${!name:-}" ]] || { echo "Missing credential: $name"; exit 1; }
-done
 umask 077
 work_dir="$(mktemp -d)"
 tunnel_pid=''
@@ -31,6 +15,22 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# Fails before credentials/network. Neither profile nor JSON/env can manufacture
+# authoritative approval: the shipped execution verifier is deliberately unavailable.
+python3 ci/release.py --authorization-output "$work_dir/authorization.json"
+[[ "${SSH_HOST:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
+[[ "${SSH_USER:-}" == cd-tunnel ]] || exit 1
+[[ "${API_TLS_NAME:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
+python3 - <<'PY'
+import os
+from urllib.parse import urlsplit
+url = urlsplit(os.environ.get('APP_URL', ''))
+if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password or url.query or url.fragment or url.path != '/':
+    raise SystemExit('Invalid application URL')
+PY
+for name in SSH_PRIVATE_KEY SSH_KNOWN_HOSTS KUBE_CA_B64 KUBE_TOKEN; do
+  [[ -n "${!name:-}" ]] || { echo "Missing credential: $name"; exit 1; }
+done
 export CD_WORK_DIR="$work_dir" KUBECONFIG="$work_dir/kubeconfig"
 python3 - <<'PY'
 import base64, json, os, socket
@@ -70,21 +70,18 @@ for attempt in {1..10}; do
   sleep 1
 done
 [[ "$ready" == true ]] || { echo 'API identity/access gate failed'; exit 1; }
-image="cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app@$IMAGE_DIGEST"
-kubectl --request-timeout=30s -n default set image deployment/diploma-app "diploma-app=$image"
+kubectl --request-timeout=15s -n default get deployment diploma-app -o json > "$work_dir/baseline.json"
+# Recheck authorization TTL, budget, UID/RV/generation/spec and previous digest.
+python3 -m ci.deployment patch "$work_dir/baseline.json" "$work_dir/authorization.json" \
+  "$work_dir/expectation.json" --patch-output "$work_dir/patch.json"
+# Exactly one logical mutation; JSON tests reject drift atomically. Unknown result:
+# EXIT/cleanup, never an automatic second patch, rollout undo or repair.
+kubectl --request-timeout=30s -n default patch deployment diploma-app --type=json \
+  --patch-file "$work_dir/patch.json" -o json > "$work_dir/reply.json"
+python3 -m ci.deployment reply "$work_dir/reply.json" "$work_dir/authorization.json" "$work_dir/expectation.json"
 kubectl --request-timeout=30s -n default rollout status deployment/diploma-app --timeout=180s
 kubectl --request-timeout=15s -n default get deployment diploma-app -o json > "$work_dir/deployment.json"
-python3 - <<'PY'
-import json, os
-from pathlib import Path
-d = json.loads((Path(os.environ['CD_WORK_DIR']) / 'deployment.json').read_text())
-expected = 'cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app@' + os.environ['IMAGE_DIGEST']
-c = [c for c in d['spec']['template']['spec']['containers'] if c['name'] == 'diploma-app']
-s = d.get('status', {})
-n = d['spec'].get('replicas', 1)
-if len(c) != 1 or c[0]['image'] != expected or n < 1 or s.get('observedGeneration', 0) < d['metadata']['generation'] or any(s.get(k, 0) != n for k in ('updatedReplicas', 'readyReplicas', 'availableReplicas', 'replicas')):
-    raise SystemExit('Deployment digest/readiness verification failed')
-PY
+python3 -m ci.deployment final "$work_dir/deployment.json" "$work_dir/authorization.json" "$work_dir/expectation.json"
 curl --fail --silent --show-error --noproxy '*' --proto '=http,https' --tlsv1.2 \
   --connect-timeout 5 --max-time 15 --max-filesize 65536 \
   --output "$work_dir/body.html" --write-out '%{http_code}' "$APP_URL" > "$work_dir/status"
