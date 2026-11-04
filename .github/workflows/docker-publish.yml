@@ -5,45 +5,80 @@ on:
   push:
     branches:
       - main
+      - feature/diploma-ci-cd-prep-137
     tags:
       - 'v[0-9]*.[0-9]*.[0-9]*'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      deploy:
-        description: Deploy the image built by this run (select a release tag)
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Offline application and release security tests
+        run: |
+          python3 ci/smoke.py
+          python3 -m unittest discover -s tests -v
+
   build-and-push:
+    needs: test
+    # Preparation branch / PR / dispatch runs test only, without registry secrets.
+    if: >-
+      github.repository == 'myachmen/netology-diploma-app' &&
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       release: ${{ steps.release.outputs.valid }}
+      source_sha: ${{ steps.release.outputs.sha }}
+      source_tag: ${{ steps.release.outputs.tag }}
+      source_run: ${{ steps.release.outputs.run }}
+      app_version: ${{ steps.release.outputs.version }}
 
     steps:
-      - name: Identify release tag
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Identify and validate release provenance
         id: release
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "$REF_TYPE" == tag && "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo 'valid=true' >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          version="$(cat ci/VERSION)"
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          valid=false
+          if [[ "$REF_TYPE" == tag ]]; then
+            [[ "$REF_NAME" == "v$version" ]]
+            git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+            valid=true
           else
-            echo 'valid=false' >> "$GITHUB_OUTPUT"
+            [[ "$GITHUB_REF" == refs/heads/main ]]
           fi
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          # Pin the source to the selected push/dispatch ref's event commit.
-          ref: ${{ github.sha }}
-          persist-credentials: false
+          {
+            echo "valid=$valid"
+            echo "sha=$GITHUB_SHA"
+            echo "tag=$REF_NAME"
+            echo "run=$GITHUB_RUN_ID"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -73,6 +108,12 @@ jobs:
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+            org.opencontainers.image.source=https://github.com/myachmen/netology-diploma-app
+            io.github.actions.run-id=${{ github.run_id }}
 
       - name: Build and push Docker image
         id: build
@@ -83,20 +124,22 @@ jobs:
           provenance: false
           sbom: false
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
-  # Hard-disabled until credentials are prepared and the user explicitly approves
-  # the temporary background SSH process. Remove the literal false only after
-  # that approval and review; neither variable grants approval by itself.
+  # PREPARATION ONLY. Literal false is mandatory until separate user approval.
+  # An environment name is a future configuration reference, not proof of approvals.
   deploy:
-    needs: build-and-push
+    needs: [test, build-and-push]
     if: >-
       false &&
+      github.repository == 'myachmen/netology-diploma-app' &&
+      github.event_name == 'push' && github.ref_type == 'tag' &&
+      github.run_attempt == 1 &&
+      needs.test.result == 'success' &&
       needs['build-and-push'].result == 'success' &&
       needs['build-and-push'].outputs.release == 'true' &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' && inputs.deploy)) &&
-      vars.CD_ENABLED == 'true' &&
-      vars.CD_SSH_TUNNEL_APPROVED == 'true'
+      vars.CD_ENABLED == 'true' && vars.CD_SSH_TUNNEL_APPROVED == 'true'
+    environment: diploma-production
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -105,6 +148,12 @@ jobs:
       group: diploma-app-production
       cancel-in-progress: false
     steps:
+      - name: Checkout trusted release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - name: Install verified kubectl v1.33.7
         shell: bash
         run: |
@@ -130,84 +179,23 @@ jobs:
           install -m 0755 kubectl "$install_dir/kubectl"
           printf '%s\n' "$install_dir" >> "$GITHUB_PATH"
 
-      - name: Deploy through a temporary SSH tunnel
+      - name: Deploy same-run immutable digest (DISABLED job)
         shell: bash
         env:
+          BUILD_RESULT: ${{ needs['build-and-push'].result }}
           IMAGE_DIGEST: ${{ needs['build-and-push'].outputs.digest }}
+          SOURCE_SHA: ${{ needs['build-and-push'].outputs.source_sha }}
+          SOURCE_TAG: ${{ needs['build-and-push'].outputs.source_tag }}
+          SOURCE_RUN: ${{ needs['build-and-push'].outputs.source_run }}
+          APP_VERSION: ${{ needs['build-and-push'].outputs.app_version }}
+          CD_ENABLED: ${{ vars.CD_ENABLED }}
+          CD_SSH_TUNNEL_APPROVED: ${{ vars.CD_SSH_TUNNEL_APPROVED }}
           SSH_HOST: ${{ vars.CD_SSH_HOST }}
           SSH_USER: ${{ vars.CD_SSH_USER }}
           API_TLS_NAME: ${{ vars.CD_API_TLS_NAME }}
+          APP_URL: ${{ vars.CD_APP_URL }}
           SSH_PRIVATE_KEY: ${{ secrets.CD_SSH_PRIVATE_KEY }}
           SSH_KNOWN_HOSTS: ${{ secrets.CD_SSH_KNOWN_HOSTS }}
           KUBE_CA_B64: ${{ secrets.CD_KUBE_CA_B64 }}
           KUBE_TOKEN: ${{ secrets.CD_KUBE_TOKEN }}
-        run: |
-          set -euo pipefail
-          # No checkout or arbitrary kubeconfig: use only the deployer token and CA.
-          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          [[ "$SSH_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
-          [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 1
-          [[ "$API_TLS_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
-          for name in SSH_PRIVATE_KEY SSH_KNOWN_HOSTS KUBE_CA_B64 KUBE_TOKEN; do
-            [[ -n "${!name}" ]] || { echo "Missing required credential: $name"; exit 1; }
-          done
-          umask 077
-          work_dir="$(mktemp -d)"
-          tunnel_pid=''
-          cleanup() {
-            if [[ -n "$tunnel_pid" ]]; then
-              kill "$tunnel_pid" 2>/dev/null || true
-              wait "$tunnel_pid" 2>/dev/null || true
-            fi
-            rm -rf -- "$work_dir"
-          }
-          trap cleanup EXIT
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-          export CD_WORK_DIR="$work_dir"
-          export KUBECONFIG="$work_dir/kubeconfig"
-          python3 - <<'PYCONFIG'
-          import base64, json, os
-          from pathlib import Path
-          root = Path(os.environ["CD_WORK_DIR"])
-          base64.b64decode(os.environ["KUBE_CA_B64"], validate=True)
-          (root / "key").write_text(os.environ["SSH_PRIVATE_KEY"] + "\n")
-          (root / "known_hosts").write_text(os.environ["SSH_KNOWN_HOSTS"] + "\n")
-          config = {
-              "apiVersion": "v1", "kind": "Config",
-              "clusters": [{"name": "cd", "cluster": {
-                  "server": "https://127.0.0.1:6443",
-                  "certificate-authority-data": os.environ["KUBE_CA_B64"],
-                  "tls-server-name": os.environ["API_TLS_NAME"]}}],
-              "users": [{"name": "deployer", "user": {"token": os.environ["KUBE_TOKEN"]}}],
-              "contexts": [{"name": "cd", "context": {
-                  "cluster": "cd", "user": "deployer", "namespace": "default"}}],
-              "current-context": "cd"}
-          (root / "kubeconfig").write_text(json.dumps(config))
-          PYCONFIG
-          unset SSH_PRIVATE_KEY SSH_KNOWN_HOSTS KUBE_CA_B64 KUBE_TOKEN
-          # FUTURE ONLY: requires explicit user approval before enabling the gates.
-          ssh -F /dev/null -N -T \
-            -i "$work_dir/key" \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
-            -o ForwardAgent=no -o StrictHostKeyChecking=yes \
-            -o "UserKnownHostsFile=$work_dir/known_hosts" \
-            -o GlobalKnownHostsFile=/dev/null \
-            -o ExitOnForwardFailure=yes -o ConnectTimeout=15 \
-            -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -L 127.0.0.1:6443:127.0.0.1:6443 \
-            "$SSH_USER@$SSH_HOST" &
-          tunnel_pid=$!
-          ready=false
-          for attempt in {1..15}; do
-            kill -0 "$tunnel_pid" 2>/dev/null || { echo 'SSH tunnel exited'; exit 1; }
-            if kubectl --request-timeout=5s -n default get deployment diploma-app -o name >/dev/null 2>&1; then
-              ready=true
-              break
-            fi
-            sleep 2
-          done
-          [[ "$ready" == true ]] || { echo 'API/deployer readiness check failed'; exit 1; }
-          kubectl --request-timeout=30s -n default set image deployment/diploma-app \
-            "diploma-app=cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app@$IMAGE_DIGEST"
-          kubectl --request-timeout=30s -n default rollout status deployment/diploma-app --timeout=180s
+        run: bash ci/deploy.sh
