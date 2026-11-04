@@ -76,11 +76,10 @@ jobs:
             org.opencontainers.image.source=https://github.com/myachmen/netology-diploma-app
             io.github.actions.run-id=${{ github.run_id }}
 
-  # PREPARATION: remove only literal false after explicit live-release approval.
+  # Local release candidate: publish to main only after exact SHA/version approval.
   deploy:
     needs: [test, build-and-push]
     if: >-
-      false &&
       github.repository == 'myachmen/netology-diploma-app' &&
       github.event_name == 'push' && github.ref_type == 'tag' &&
       github.run_attempt == 1 &&

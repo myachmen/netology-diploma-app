@@ -1,10 +1,21 @@
-# Минимальный CI/CD диплома — подготовка №142
+# Минимальный CI/CD диплома — подготовка №142, кандидат №143
 
-**Сейчас: CODE READY / CD DISABLED.** Ветка `feature/diploma-minimal-cd-142`
+**Локальный кандидат №143: version1.0.2 / LIVE CD UNVERIFIED.** Исходная ветка `feature/diploma-minimal-cd-142`
 происходит от prep140 `c67945fcda701d188c1e42d5a856b51cf9d7773d`.
-В №142 разрешены только код, offline checks, test-only CI и публикация ветки.
-Никаких registry/SSH/Kubernetes/cloud/settings/credential действий и merge.
-Описанные ниже действия с работающей системой — проект следующего согласования.
+В №142 разрешались только код, offline checks, test-only CI и публикация ветки.
+Для №143 действуют отдельные явные разрешения пользователя; эта инструкция
+не выдаёт новых прав. Main/registry publish/tag/CD требуют отдельного SHA approval.
+Release/main/tag действия ниже остаются проектом до отдельного подтверждения;
+подготовленные доступы отражены в датированном срезе143, не обещают постоянный health.
+
+Срез143 от2026-11-04: через trusted control-plane проверены3 Ready Nodes,
+18/18 системных Pods, app2/2 и HTTP200 через Service/ALB. Создан dedicated cd-tunnel
+с проверенными restrictions и named SA/Role/Binding; actual scoped get/list/watch
+и positive/negative authorization прошли. Один supervised forwarding закрыт.
+Private материалы для ручного UI placement подготовлены вне Git; GitHub placement
+ещё не подтверждён. Актуальный expiry токена — в защищённом handoff metadata/отчёте,
+не в этой инструкции. Publisher права YC_SA_KEY_JSON и реальный release ещё не доказаны.
+Public SSH worker-2 не использовался; его stale local binding оставлен без изменения.
 
 ## Что делает workflow
 
@@ -15,8 +26,11 @@
 | Pull request в main | Только tests, без Secrets и deployment |
 | Новый tag `vX.Y.Z` | Tests → проверить tag=ci/VERSION, HTML version, checkout SHA и ancestry main → build/push `X.Y.Z` и `sha-SHA` с OCI version/revision labels → deploy digest **этого же run** → rollout/HTTP smoke |
 
-Deploy пока содержит **один эффективный выключатель `false &&`**.
-После отдельного разрешения activation diff удаляет только этот literal;
+В локальном candidate diff удалён только выключатель `false &&`; remote main
+пока остаётся выключенным. До отдельного подтверждения actual SHA/version
+кандидат не публикуется. Его обычная feature-ветка при push запустила бы registry
+build, поэтому хранить этот commit локально. После согласования — одно
+fast-forward обновление main и только затем согласованный новый tag;
 tests принимают как disabled, так и корректный release profile. Нет обязательных
 CD flags, environment/reviewer, APH-CD/1, policy token/observer, GitHub policy API
 reads или artifact admission. APH/1.1 для обмена заданиями остаётся неизменным.
@@ -31,7 +45,7 @@ build/push. Registry выбран один: **Yandex Container Registry**; он 
 ## Существующие ресурсы и точный scope
 
 - App repo: `myachmen/netology-diploma-app`, целевой main; подготовка только новая
-  feature-ветка. Main сейчас прежний; реальная интеграция ещё не выполнена.
+  feature-ветка. Main ещё прежний; локальный candidate1.0.2 подготовлен, реальная интеграция не выполнена.
 - Image: `cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app`.
   Registry и pull access уже использовались исторически; текущая работоспособность
   и права publisher/puller в142 не проверялись. IAM и pull Secret не менять.
@@ -43,12 +57,15 @@ build/push. Registry выбран один: **Yandex Container Registry**; он 
 - Dedicated identity: SSH `cd-tunnel`, Kubernetes SA/Role/RoleBinding
   `default/github-actions-deployer` из
   [RBAC139](https://github.com/myachmen/netology-devops-from-zero-homeworks/blob/8f57aebf85b088279a9314735d5fb31474c58cb8/kubernetes/cd/rbac.yaml).
-  Это **draft**, его наличие в Git не доказывает effective cluster grants.
+  В143 этот scope создан и проверен фактическими authorization tests; повторно
+  применять без сверки не требуется. Наличие YAML само по себе этого не доказывает.
 - [SSH role](https://github.com/myachmen/netology-devops-from-zero-homeworks/blob/6c80ea5f1e099c3199c2896562c23bebda04117b/ansible/roles/cd_tunnel/README.md)
   — review-only, не activation playbook. Не применять её как готовый account setup.
 
 GitHub-hosted ephemeral runner через существующий SSH — минимальный кандидат,
-но current identity/trust/route/CA/RBAC UNKNOWN. Admin kubeconfig, ключ ubuntu,
+в срезе143 route/CA/RBAC и dedicated credentials проверены. Перед релизом нужны
+короткий fresh gate, действительный token и подтверждённый GitHub placement.
+Admin kubeconfig, ключ ubuntu,
 Terraform/IAM identity не используются как shortcut. Если имеющийся маршрут
 небезопасен/недоступен — STOP. Один простой альтернативный вариант: доверенный
 оператор на существующей management машине выполняет тот же scoped digest deploy.
@@ -118,11 +135,11 @@ Scoped TokenRequest выполняет уполномоченный operator, н
 
 | Необходимое действие | Сейчас | Оператор / разрешение | Риск и verification |
 |---|---|---|---|
-| Короткий current identity/strict host-key/TLS и scoped access gate | UNKNOWN, historical health134 не current | Infrastructure owner; bounded read-only probes и, если нужен, один собственный временный forwarding | Mismatch/новый network scope → STOP; existing API readyz/get, отрицательные auth tests, cleanup |
-| Только restricted SSH account/key + SA/Role/RoleBinding выше, если ещё отсутствуют | Git drafts, effective UNKNOWN | VM/K8s owner; явно согласованные guest/RBAC writes и dedicated credential issuance; без cloud/IAM writes | Сохранить admin recovery; sshd validation/negative channel tests; effective RBAC без extra grants |
-| Названные Secrets/vars и scoped token | UNKNOWN; имена не значения | Repo/credential owners; explicit provisioning и cleanup scope | Не reuse admin material, actual authentication/TTL, no logs |
-| Reviewed main integration + version HTML/ci/VERSION, например1.0.2 | Main старый, source prep1.0.0 | Maintainer + пользователь разрешают merge и registry build/push side effect | Offline tests и разрешённый main CI success; новый commit SHA, labels/tags/digest |
-| Activation + один новый release tag | Literal false сейчас; v1.0.0/v1.0.1 уже существовали по141 | Пользователь утверждает удаление только false, exact main SHA/version и ОДИН tag/run; maintainer обычный tag push, no force | Непосредственно проверить свободное имя Git/registry, не перемещать старые tags. Tag SHA/version/main ancestry → test/build/digest/deploy |
+| Короткий current identity/strict host-key/TLS и scoped access gate | PASS в срезе143; перед release проверить freshness/expiry | Infrastructure owner; bounded read-only probes и, если нужен, один собственный временный forwarding | Mismatch/новый network scope → STOP; existing API readyz/get, отрицательные auth tests, cleanup |
+| Restricted SSH account/key + SA/Role/RoleBinding | Созданы и actual tests PASS в143 | Не повторять setup; только сверить actual state | Сохранён ubuntu, один validated reload; direct public SSH worker-2 не требуется |
+| Названные Secrets/vars и scoped token | Защищённые handoff files готовы; GitHub placement PENDING | Repo owner вручную вносит4 CD Secrets/4 vars; YC_SA_KEY_JSON без изменения | Existing authenticated scope проверен; actual expiry/remaining перед release, no logs |
+| Reviewed main integration + version HTML/ci/VERSION, например1.0.2 | Main старый, local candidate1.0.2 | Maintainer + пользователь разрешают merge и registry build/push side effect | Offline tests и разрешённый main CI success; новый commit SHA, labels/tags/digest |
+| Activation + один новый release tag | Remote main false; local candidate готов; v1.0.0/v1.0.1 уже существуют | Пользователь утверждает удаление только false, exact main SHA/version и ОДИН tag/run; maintainer обычный tag push, no force | Непосредственно проверить свободное имя Git/registry, не перемещать старые tags. Tag SHA/version/main ancestry → test/build/digest/deploy |
 
 Branch protection/environment/reviewer/APh policy observer не добавлять как
 обязательные препятствия. При неопределённом результате mutation не rerun job
