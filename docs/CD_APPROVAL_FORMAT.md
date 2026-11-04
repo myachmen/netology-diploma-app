@@ -56,7 +56,9 @@ Runtime поля — также точный allowlist:
   APP_URL, CD_EXPECTED_AUDIENCE и их точными строковыми значениями. Формат canonical
   JSON тот же sort_keys/separators выше. Public record содержит **только hashes**,
   без самих values. Verifier сравнивает их локально после authenticated API checks;
-  raw values не передаются API observer/в сеть. Private key не хешируется/не публикуется.
+  token/CA/known_hosts и endpoint-конфигурация не передаются observer/в сеть.
+  Expected audience используется внутри verifier для локальной проверки hash,
+  но не включается в HTTP-запросы. Private key не хешируется/не публикуется.
 - checks: строго true для scoped_credentials_verified, ssh_identity_verified,
   tls_verified, previous_digest_verified; это явно **reviewer attestations**.
   GitHub protection/review checks в payload не задаются: их вычисляет API verifier.

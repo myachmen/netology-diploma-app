@@ -75,8 +75,10 @@ spec hash/digests — несекретная операционная metadata; 
 
 Отдельные commitments связывают допуск с actual injected KUBE_TOKEN и canonical
 trust configuration (CA, known_hosts, endpoints/user/TLS/app/audience). Они
-сравниваются локально **после** authenticated API checks, raw values не отправляются
-observer/в API и не логируются. Substitution Secret/endpoint → deny. На повторной
+сравниваются локально **после** authenticated API checks. Token, CA, known_hosts
+и endpoint-конфигурация не передаются observer. Expected audience отдельно
+используется внутри verifier для локальной сверки commitment, но не включается
+в HTTP-запросы. Raw values не логируются. Substitution Secret/endpoint → deny. На повторной
 проверке значения передаются только gate subprocess из неэкспортируемых shell
 variables, затем удаляются; SSH/kubectl/curl их через env не наследуют. xtrace
 принудительно выключен. Это связывание с attested материалом, не доказательство
