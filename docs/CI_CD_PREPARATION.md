@@ -1,131 +1,108 @@
-# CI/CD preparation — №139, APH/1.1
+# CI/CD preparation — №140, APH/1.1
 
 **CD_DISABLED / NO_RUNTIME_MUTATIONS / NO_NEW_SECRETS.**
-Application preparation: feature/diploma-ci-cd-fixes-139, parent №137.
-Никакого merge в main или первого release этот документ не разрешает.
-Текущие ci/VERSION/index.html остаются1.0.0; fixtures1.0.1 меняются только в /tmp.
+Новая ветка feature/diploma-cd-access-gates-140 происходит от подготовки139.
+Версия/HTML остаются1.0.0, основных веток и implementation изменений нет.
 
-## Что исправлено после №138
+## Исполнимый admission вместо отсутствующего verifier
 
-- Version negative fixture берёт актуальную ci/VERSION, меняет ровно один
-  существующий marker и отказывает при missing/duplicate/no-op replacement.
-  Проверяются good/bad contexts для1.0.0 и временной1.0.1 без Docker daemon.
-- PREPARATION/ACTIVATION получили отдельные статические и pure contract tests.
-  Снятие false в *временной* ACTIVATION fixture не требует удаления security tests.
-  Текущий workflow остаётся PREPARATION и literal false &&.
-- Exact approved ref/SHA gates добавлены без конкретных одобренных значений.
-  Vars/flags default missing→deny. Нет dispatch для deployment, PR/fork/rerun denied.
-- Same-run tag/version/sha/run/digest contract сохранён. Actions закреплены на
-  проверенных upstream commit SHAs, а не major tags.
-- Один guarded JSON patch вместо set image: UID/resourceVersion/generation,
-  replicas2, container name и previous image tests предшествуют replace image.
-  Полный approved spec hash и verified previous digest проверяются до генерации.
-  Ответ patch должен дать тот же UID, ровно следующую generation и ожидаемый spec;
-  final check допускает новый status resourceVersion, но не новую spec generation.
-- Named RBAC draft подготовлен отдельно в implementation: get/patch/list/watch,
-  resourceNames только diploma-app. Это код, не применённые права.
+`ci/activation.py:authorize_execution` теперь по умолчанию подключает
+`GitHubVerifier(GitHubAPI(...))`, а не завершается из-за отсутствующего adapter.
+Сначала проверяются PREPARATION/ACTIVATION, trusted push/tag/attempt1 и exact
+CD_EXPECTED_REF/SHA. **PREPARATION отказывает до чтения read token/сети**.
+Текущий YAML сохраняет literal false && и CD_PROFILE: PREPARATION.
 
-## Граница между тестом контракта и разрешением execution
+Будущий ACTIVATION получает proof только из authenticated GitHub REST:
+repository ID/name, authoritative run/actor/attempt/SHA/ref, main ancestry,
+classic branch protection, exact immutable tag ruleset, environment policy и
+approved review от настроенного независимого User reviewer. Нет anonymous/token
+fallback, input JSON, env observations, custom API origin или CLI test-provider.
 
-`ci/activation.py:validate_activation` проверяет **уже аутентифицированные** observations:
-repository/ref/SHA/run/attempt/digest, независимого reviewer, свежесть, branch/tag
-protection, environment approval/no bypass, scoped credential/trust/TLS observations,
-namespace/resource/verbs, TTL/audience и остаточный job budget. SyntheticVerifier
-есть **только в tests/fixtures.py**; он не является источником доверия для CI.
+`CD_GITHUB_READ_TOKEN` — имя будущего environment Secret; значения/наличие не
+читались и не создавались. Нужны Actions:read, Contents:read, Metadata:read и
+Administration:read для branch protection, только этот repository. Отдельно нужна
+видимость bypass_actors в ruleset API. Если read-only доступ скрывает поле —
+BLOCKED, **не выдавать CI write permissions ради обхода**. Подробнее:
+[access plan](CD_ACCESS_PLAN.md), [approval format](CD_APPROVAL_FORMAT.md).
 
-`authorize_execution` — обязательный runtime choke point. PREPARATION всегда denied.
-ACTIVATION без отдельно reviewed authenticated verifier тоже всегда BLOCKED.
-Штатный CLI **не интегрирует verifier** и не загружает его из env/path/JSON/plugin.
-`CD_GATE_VERIFIED=true`, готовый JSON или флаги не могут разрешить deployment.
-Даже случайное удаление false && не создаёт работающий путь к credentials/SSH/API.
+## Как проверяется digest
 
-Это намеренно незавершённый **BLOCKED activation component**, а не заявление о
-проверенных GitHub protections или правах. Требуется отдельно согласовать и
-реализовать аутентифицированную связь GitHub policy/review metadata и свежих
-independent scoped-runtime observations с конкретным run. Нельзя заменить её
-`SyntheticVerifier`, словарём true или непроверенным repo artifact. Доступов для
-такой runtime проверки №139 не даёт; production verifier не выдумывается.
+После успешной release build подготовлен шаг создания non-secret cd-release.json
+с repository/ref/SHA/run/attempt/version/digest и producer_job. Pinned
+actions/upload-artifact v4 публикует immutable artifact cd-release-RUN-ATTEMPT,
+overwrite=false. Оба шага доступны только trusted release build job; prep branch
+не запускает build/push/upload. Main и tag permissions не расширены до write.
 
-## Профили
+Verifier через GitHub API проверяет completed/success test и build job, successful
+manifest steps, artifact ID/name/expiry/run/repository/head SHA и build interval.
+Затем проверяет SHA256 ZIP по API digest и единственный allowlisted JSON member.
+Manifest обязан полностью соответствовать event и digest из authenticated reviewer
+attestation. Job output сам по себе не является допуском. Это доверие к reviewed
+build workflow + GitHub artifact integrity, **не SLSA/image signature и не
+независимый аудит содержимого registry**. Компрометацию trusted builder это не решает.
 
-| Профиль | Статические условия | Исполнение |
-|---|---|---|
-| PREPARATION (текущий) | Leading literal false &&, CD_PROFILE: PREPARATION; все остальные guards сохранены | Безусловный отказ execution до credentials/network |
-| ACTIVATION (только offline fixture) | Та же conjunction без false, CD_PROFILE: ACTIVATION; exact ref/SHA, trusted event/attempt, environment/scoped timeout/pinned actions | Только при будущем authenticated verifier и полном runtime gate; сейчас CLI BLOCKED |
+Все Actions остаются immutable-pinned. Новый pin upload-artifact v4:
+`ea165f8d65b6e75b540449e92b4886f43607fa02`, проверенный официальный Git tag.
+Mutable nginx base и registry credential privileges остаются отдельными рисками.
 
-Профиль нельзя выбрать input/vars значением: в текущем YAML это literal.
-`ci/workflow_policy.py` проверяет канонический набор conjuncts: добавленный OR,
-missing condition/approval boundary, unpinned action — fail. Это ограниченный
-static checker для данного workflow; полный YAML/workflow syntax проверяет actionlint.
-Тесты не заменяют GitHub branch/tag protections и environment configuration.
+## Runtime attestation: явная граница доверия
 
-Prep push в feature/diploma-ci-cd-fixes-139 выполняет только tests. Main и release
-push в будущем могут build/publish только после tests. PR/dispatch/prep/fork не
-получают registry/CD secrets через эти jobs. Нет pull_request_target/workflow_run,
-id-token/write GITHUB_TOKEN permissions. Main workflow сейчас не менялся.
+Approved environment review должен содержать APH-CD/1 comment. Сервер GitHub
+аутентифицирует reviewer ID, состояние approval, environment и принадлежность к run;
+verifier проверяет issuer против текущих configured User reviewers и исключает
+run actor/trigger actor. Team reviewers сейчас fail-closed без неявного чтения org
+membership. Rejection/дубликаты/неполная metadata/HTTP error — deny.
 
-## Immutable Actions refs
+JSON внутри такого review — **утверждение доверенного оператора** о свежем
+runtime preflight, scoped identity/TTL/audience/SSH/TLS и baseline. Не выдавать
+его за автоматическую проверку Kubernetes. Копия того же JSON в env/file, от
+другого автора или без approved review не авторизует ничего. Новых signing keys,
+trust service или credentials не создаётся: authority — существующие GitHub
+reviewer identity и API authentication после отдельно утверждённой настройки.
 
-Проверены GitHub Git refs официальных repositories на дату подготовки; это pinning,
-не независимый security audit самих Actions. Полные commit URLs:
+GitHub review history не даёт используемого независимого timestamp approval;
+issued_at/expires_at — **явные поля reviewer attestation**, не выдуманные API поля.
+Verifier ограничивает их run.created_at, текущим временем и сроком≤300s. Сам run
+не старше45min, attempt1. Job deadline берётся из API deploy.started_at+600s.
+К моменту patch token remaining≥900s и job remaining≥300s; runtime observation
+не старше300s. При expiry — STOP; второй patch/rerun не выполняется.
 
-- [checkout v4](https://github.com/actions/checkout/commit/11d5960a326750d5838078e36cf38b85af677262)
-- [setup-buildx v3](https://github.com/docker/setup-buildx-action/commit/8d2750c68a42422c14e847fe6c8ac0403b4cbd6f)
-- [login v3](https://github.com/docker/login-action/commit/c94ce9fb468520275223c153574b00df6fe4bcc9)
-- [metadata v5](https://github.com/docker/metadata-action/commit/c299e40c65443455700f0fdfc63efafe5b349051)
-- [build-push v6](https://github.com/docker/build-push-action/commit/10e90e3645eae34f1e60eeb005ba3a3d33f178e8)
+В public comment нет token/key/CA/kubeconfig/private endpoint. Для audience
+публикуется только SHA256 commitment; настоящее значение остаётся в защищённой
+конфигурации и private temporary proof. Hash не является шифрованием. UID/RV/
+spec hash/digests — несекретная операционная metadata; её публикация тоже входит
+в будущее отдельное разрешение владельца.
 
-Base nginx tag остаётся mutable; registry contents/OCI labels/signatures в139 не
-проверялись. Same-run digest provenance не является подписанной attestation.
+Отдельные commitments связывают допуск с actual injected KUBE_TOKEN и canonical
+trust configuration (CA, known_hosts, endpoints/user/TLS/app/audience). Они
+сравниваются локально **после** authenticated API checks, raw values не отправляются
+observer/в API и не логируются. Substitution Secret/endpoint → deny. На повторной
+проверке значения передаются только gate subprocess из неэкспортируемых shell
+variables, затем удаляются; SSH/kubectl/curl их через env не наследуют. xtrace
+принудительно выключен. Это связывание с attested материалом, не доказательство
+прав token; их предварительно проверяет уполномоченный оператор.
 
-## Guarded deployment contract
+## До единственной mutation
 
-`ci/deployment.py` — pure functions + offline JSON CLI, без kubectl/network.
-Защищённые authorization observations должен создать только будущий verifier.
-Они связывают конкретные repository/ref/SHA/run/attempt/digest с approvals,
-scope и свежим baseline UID/RV/generation/spec hash/previous image+digest.
+Первый API gate предшествует credential files/SSH. Policy read token убирается
+из экспортированного окружения SSH/kubectl/curl; только в отдельный subprocess
+recheck он передаётся через env без argv/log. Перед patch заново читаются
+authoritative GitHub policy/review/artifact; proof должен точно совпасть с первым
+и оставаться действительным. Это две проверки во времени, не непрерывная блокировка
+GitHub settings: другие app/settings writes в первом окне запрещаются организационно.
 
-Current template может содержать tag1.0.0. Тогда previous_digest_verified должен
-доказать прежний **runtime digest**, а не предположить его из текста tag. Его
-получает отдельно разрешённый оператор через узкий read scope/registry checks;
-deployer не получает pods права только ради этого. Для digest template совпадение
-с previous digest проверяется непосредственно. Same digest/no-op release denied.
+Сохраняется guarded JSON patch139: test UID/RV/generation/replicas/container/old
+image, then один replace YCR@sha256. Проверяются approved spec hash, verified
+previous runtime digest, exact reply/final generation/spec/UID и readiness2.
+Status RV может изменяться. Конфликт/неизвестный outcome → STOP/read-only reconcile,
+не auto-refresh/retry/rollback. Server RBAC patch риск не исчезает: он не image-only.
 
-Перед одним patch: named Deployment имеет правильные namespace/name/kind, один
-ожидаемый container, replicas2, stable readiness и approved spec hash. Baseline
-UID/RV/generation/image должны совпасть с независимыми observations. При stale
-RV/status/concurrent rollout — STOP, не автоматический refresh/retry мутации.
-API JSON tests закрывают race между GET и patch. Они не уменьшают серверные права
-украденного токена: patch по RBAC всё ещё позволяет другие Pod-template changes.
+SSH только dedicated cd-tunnel, pinned host key, agent off, loopback forward,
+CA/SAN TLS, scoped temporary kubeconfig; admin fallback и insecure flags запрещены.
+Cleanup только своего tunnel/tempdir; SIGKILL не гарантирует trap. HTTP200+HTML/
+version дополняют digest/rollout evidence, не доказывая imageID каждого Pod.
 
-После patch: exact UID, generation baseline+1, новый RV, полный ожидаемый spec.
-После rollout: те же UID/generation/spec, observedGeneration и все replica counts2.
-Чужой rollout, scale, recreate или side effect admission — STOP. Readiness status
-может обновлять RV, поэтому final RV не обязан равняться patch response RV.
-Rollout status по умолчанию следит за latest revision, но guard не принимает
-чужую generation как успешный результат нашего deployment.
-
-`ci/deploy.sh` сначала проходит execution gate; только затем читает credential env,
-создаёт private temp files и SSH forwarding. Сохраняются StrictHostKeyChecking,
-dedicated cd-tunnel, pinned known_hosts, loopback bind, CA/SAN verification,
-отказ от admin kubeconfig/agent/TLS bypass. Authorization token expiry/audience,
-approvals freshness и budget повторно проверяются непосредственно перед patch.
-
-Budgets: observations не старше300s; token remaining≥900s; перед patch job
-remaining≥300s. Это параметры будущего согласования, не доказанные реальные TTL.
-Job10min, patch30s, rollout180s, named GET15s, HTTP connect5/total15s; downloads
-имеют ограниченные read retries. Read/watch reconnect ≠ повтор deployment.
-В script одна logical patch, без retry/repair/rollout undo. HTTP200+expected
-HTML/version через существующий URL дополняет digest/UID/generation evidence;
-это не криптографическое доказательство imageID каждого Pod.
-
-Timeout/неизвестный patch outcome → EXIT и cleanup; CI cancellation не откатывает
-Deployment controller. Не посылать вторую patch по предположению, что первая
-не прошла. Cleanup завершает/ожидает только свой SSH и удаляет свой tempdir;
-SIGKILL не гарантирует trap, поэтому future runner должен быть ephemeral.
-Private JSON output files создаются exclusive0600; нет env/kubeconfig debug/artifacts.
-
-## Проверки №139
+## Offline checks и limits
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 ci/smoke.py
@@ -134,60 +111,24 @@ actionlint .github/workflows/docker-publish.yml
 bash -n ci/deploy.sh
 ```
 
-Tests используют только stdlib и временные файлы: positive/negative contexts,
-PREPARATION/ACTIVATION policy fixtures, untrusted/missing/expired approvals и
-allowlist, pure JSON patch API stub, concurrency conflict, wrong generation,
-unready baseline/final, remaining budget. Полный script с обоими профилями и
-всеми true flags блокируется до stub ssh/kubectl/curl. Background SSH не создаётся.
-Нет Docker daemon, production/registry calls или credential values в fixtures.
-Offline ACTIVATION pass означает валидность synthetic model, не право активации.
+Tests подменяют только transport/clock внутри процесса; production CLI не имеет
+test switch. Никаких network calls/Secret values в fixtures. Проверяются целый
+factory→API verifier→admission path, fake/rejected/self approvals, API errors,
+run/tag/SHA/digest mismatch, hidden policy fields, attestation expiry, artifact
+tampering/foreign provenance, unsafe ZIP/redirect, scoped time budget, Deployment
+drift и current/temporary1.0.1 version suites. API bearer передаётся только fixed
+api.github.com GET allowlist; artifact redirect идёт без bearer. Нет retries,
+proxy inheritance, sensitive endpoints или логирования HTTP bodies/headers.
 
-## Checklist будущего предметного разрешения
+Positive stub не доказывает live policy/access. Реальная API visibility,
+CD_GITHUB_READ_TOKEN, environment, SSH/TLS/RBAC и current health — UNKNOWN/BLOCKED
+до отдельного preflight. Missing can_admins_bypass/type/bypass fields не получают
+безопасных default values. Unsupported inherited/team/partial metadata — STOP,
+не выдача широких прав. Версия API зафиксирована2026-03-10; live compatibility
+проверяется в будущем без ослабления условий.
 
-1. Утвердить code diff/main merge и side effect: каждый main push запускает
-   test/build/push latest/sha в существующих registries. В139 main не меняется.
-2. Настроить GitHub main/release protections, reviewer/check enforcement, запрет
-   force/delete и bypass; environment diploma-production с независимым reviewer,
-   prevent self-review и exact selected tag. Имя environment в YAML этого не делает.
-3. Согласовать authenticated verifier integration и реальные источники policy/
-   approval/runtime evidence. До этого runtime gate остаётся BLOCKED.
-4. Согласовать restricted SSH OS/access changes: отдельный user/key без sudo/exec/
-   PTY/SFTP/agent/reverse/other destinations, sshd -t/-T, сохранение ubuntu admin,
-   reviewed один reload и channel tests. Роль cd_tunnel сейчас review-only.
-   Ни широкого ключа, ни новой SG/API exposure/платной VM как shortcut.
-5. Применять только отдельно утверждённый минимальный RBAC draft после review
-   existing bindings; positive filtered list/watch и negative matrix из
-   implementation kubernetes/cd/README.md. Принять patch residual risk либо
-   отдельно утвердить admission guard. Effective permissions пока UNKNOWN.
-6. Утвердить current VM/independent host-key/TLS CA/SAN и scoped TokenRequest
-   audience/TTL/rotation. Не читать Terraform/YCR admin credentials ради CD.
-7. Environment secrets (только имена): CD_SSH_PRIVATE_KEY, CD_SSH_KNOWN_HOSTS,
-   CD_KUBE_CA_B64, CD_KUBE_TOKEN. Variables: CD_SSH_HOST, CD_SSH_USER,
-   CD_API_TLS_NAME, CD_APP_URL. Repository gate vars: CD_ENABLED,
-   CD_SSH_TUNNEL_APPROVED, CD_EXPECTED_REF, CD_EXPECTED_SHA, CD_EXPECTED_AUDIENCE.
-   Environment variables ещё недоступны job.if. Отсутствующие значения → deny.
-   Secret placement/values/effective roles/rotation не проверялись и не менялись.
-8. Выбрать свободные Git/registry version names и reviewed activation SHA. Tags
-   v1.0.0/v1.0.1 уже существовали в138; не двигать их. Кандидат v1.0.2 — НЕ approval.
-   Version bump только в будущем утверждённом release diff, не в139.
-9. Сначала approved activation commit (при выключенных flags), затем exact ref/SHA
-   allowlist и один новый tag/run. Старый tag сохраняет старый workflow; rerun
-   запрещён attempt1 guard. Tests→build/publish→review конкретных SHA/run/digest→
-   scoped activation→одна patch→rollout→HTTP, без удаления security tests.
-10. Issue короткий token непосредственно перед environment approval после build;
-    проверить actual expiry и окно10min job+skew. Не создавать legacy SA-token
-    Secret и не выдавать deployer право выпускать себе токены. При нехватке TTL,
-    time budget, metadata drift/host-key/TLS/RBAC mismatch — STOP.
-11. Freeze других app writes в первом окне; save previous verified runtime digest
-    и baseline. Никакого automatic job rerun/repair/reset/rollback. После unknown
-    outcome только read-only reconcile; rollback — отдельное разрешение на одну
-    targeted patch прежнего digest и проверки. Cleanup/disarm/revoke и cancel
-    только approved run также входят в отдельно согласованный scope.
-
-Остаются UNKNOWN: actual GitHub-hosted reachability, SSH user/trust, TLS, bindings,
-credentials/environment, runtime previous digest, новый registry build и rollout.
-Ни live health, ни end-to-end CD не объявлены выполненными.
-
-История: подготовка137 дала CI tests и disabled deploy; read-only138 уточнила
-list/watch, version/activation fixtures и missing protections. №139 исправляет
-код подготовки; инфраструктурные/credential gates остаются отдельными.
+История:137 добавила tests;138 выявила gaps;139 исправила fixtures/RBAC/JSON guard,
+но оставляла adapter unavailable.140 подключает реальный API path и формализует
+trusted reviewer attestation; **production CD не включён**. Следующее действие —
+утверждение exact access/settings/credential scope из плана, а не снятие false
+без проверок. Никакого автоматического перехода к следующему заданию.

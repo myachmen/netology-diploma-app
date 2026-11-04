@@ -19,8 +19,8 @@ class ActivationContract(unittest.TestCase):
         self.assertEqual(authorize_execution(env, verifier, NOW), proof)
         self.assertEqual(verifier.calls, 1)
 
-    def test_no_provider_means_blocked_even_with_true_flags(self):
-        with self.assertRaisesRegex(ValueError, 'authenticated activation verifier'):
+    def test_missing_authenticated_api_token_means_blocked_even_with_true_flags(self):
+        with self.assertRaisesRegex(ValueError, 'CD_GITHUB_READ_TOKEN'):
             authorize_execution(environment(), now=NOW)
 
     def test_preparation_unknown_profiles_flags_and_allowlist_fail_before_provider(self):
@@ -49,10 +49,12 @@ class ActivationContract(unittest.TestCase):
     def test_bindings_approval_time_scope_and_ttl(self):
         mutations = [('schema', True), ('checks', None), ('repository', 'fork/app'), ('ref', 'refs/tags/v2.0.0'), ('sha', 'c' * 40),
                      ('run_id', '456'), ('attempt', 2), ('attempt', True), ('digest', 'latest'),
-                     ('environment', 'unprotected'), ('observed_at', NOW - 301),
+                     ('environment', 'unprotected'), ('authorization_expires_at', NOW - 1),
+                     ('authorization_expires_at', NOW + 301), ('observed_at', NOW - 301),
                      ('observed_at', NOW + 1), ('approved_at', NOW - 10), ('approved_at', NOW + 1),
                      ('reviewer', 'synthetic-author'), ('reviewer', 'SYNTHETIC-AUTHOR'), ('reviewer', ''), ('token_audience', 'other'),
-                     ('token_expires_at', NOW + 899), ('job_deadline', NOW + 299)]
+                     ('token_expires_at', NOW + 899), ('token_expires_at', float('inf')),
+                     ('job_deadline', float('inf')), ('job_deadline', NOW + 299)]
         for key, value in mutations:
             proof = evidence()
             proof[key] = value
@@ -84,6 +86,7 @@ class ActivationContract(unittest.TestCase):
                     tool.chmod(0o700)
                 env = dict(os.environ, **environment())
                 env['CD_PROFILE'] = profile
+                env['CD_GITHUB_READ_TOKEN'] = ''  # Never inherit a real read token in tests.
                 env['PATH'] = tmp + os.pathsep + os.environ['PATH']
                 # Neither evidence JSON nor this flag is consumed as authorization.
                 env['CD_GATE_VERIFIED'] = 'true'

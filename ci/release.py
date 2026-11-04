@@ -38,11 +38,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     try:
         proof = authorize_execution(os.environ)
-        # No production verifier is wired in this preparation. Env/file fixtures
-        # cannot reach this write; a future reviewed implementation must supply it.
+        # Only authenticated GitHub admission may reach this output.
+        # There is deliberately no input-JSON/test-provider CLI option.
         fd = os.open(args.authorization_output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'w') as output:
             json.dump(proof, output)
         print("Authenticated activation contract PASS")
     except ValueError as exc:
         raise SystemExit("Release gate FAIL: " + str(exc)) from None
+    except (KeyError, TypeError, AttributeError, UnicodeError, OSError):
+        raise SystemExit('Release gate FAIL: BLOCKED malformed/unavailable admission; no retry') from None

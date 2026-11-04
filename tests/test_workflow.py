@@ -61,7 +61,8 @@ class WorkflowSecurity(unittest.TestCase):
                 ['myachmen/netology-diploma-app', 'untrusted/fork'],
                 ['push', 'pull_request', 'pull_request_target', 'workflow_dispatch', 'workflow_run'],
                 ['refs/heads/main', 'refs/heads/feature/diploma-ci-cd-prep-137',
-                 'refs/heads/feature/diploma-ci-cd-fixes-139', 'refs/tags/v1.0.0']):
+                 'refs/heads/feature/diploma-ci-cd-fixes-139',
+                 'refs/heads/feature/diploma-cd-access-gates-140', 'refs/tags/v1.0.0']):
             values = {'github.repository': repo, 'github.event_name': event, 'github.ref': ref}
             rendered = expression
             for key, value in values.items():
@@ -83,6 +84,17 @@ class WorkflowSecurity(unittest.TestCase):
         self.assertIn('permissions:\n  contents: read', TEXT)
         self.assertIn('persist-credentials: false', test)
         self.assertNotIn('--insecure', TEXT)
+
+    def test_release_manifest_is_only_a_trusted_release_build_step(self):
+        build = job('build-and-push')
+        self.assertIn('name: Record immutable release manifest', build)
+        self.assertIn('name: Upload immutable release manifest', build)
+        self.assertEqual(build.count("if: steps.release.outputs.valid == 'true'"), 2)
+        self.assertIn('name: cd-release-${{ github.run_id }}-${{ github.run_attempt }}', build)
+        self.assertIn('overwrite: false', build)
+        self.assertIn('path: ${{ runner.temp }}/cd-release.json', build)
+        self.assertNotIn('upload-artifact', job('test'))
+        self.assertNotIn('upload-artifact', job('deploy'))
 
 
 if __name__ == '__main__':

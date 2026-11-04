@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - feature/diploma-ci-cd-fixes-139
+      - feature/diploma-cd-access-gates-140
     tags:
       - 'v[0-9]*.[0-9]*.[0-9]*'
   pull_request:
@@ -126,6 +126,27 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      - name: Record immutable release manifest
+        if: steps.release.outputs.valid == 'true'
+        env:
+          BUILD_RESULT: success
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          APP_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.sha }}
+          SOURCE_TAG: ${{ steps.release.outputs.tag }}
+          SOURCE_RUN: ${{ steps.release.outputs.run }}
+        run: python3 -m ci.build_manifest "$RUNNER_TEMP/cd-release.json"
+
+      - name: Upload immutable release manifest
+        if: steps.release.outputs.valid == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4, verified upstream
+        with:
+          name: cd-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cd-release.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 1
+
   # PREPARATION ONLY. Literal false is mandatory until separate user approval.
   # An environment name is a future configuration reference, not proof of approvals.
   deploy:
@@ -184,6 +205,7 @@ jobs:
         shell: bash
         env:
           CD_PROFILE: PREPARATION
+          CD_GITHUB_READ_TOKEN: ${{ secrets.CD_GITHUB_READ_TOKEN }}
           CD_EXPECTED_REF: ${{ vars.CD_EXPECTED_REF }}
           CD_EXPECTED_SHA: ${{ vars.CD_EXPECTED_SHA }}
           CD_EXPECTED_AUDIENCE: ${{ vars.CD_EXPECTED_AUDIENCE }}

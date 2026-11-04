@@ -1,7 +1,7 @@
 """Synthetic offline observations; NOT approval for any real ref or credentials."""
 from copy import deepcopy
 
-from ci.activation import CHECKS
+from ci.activation import CHECKS, credential_commitments
 from ci.deployment import REPOSITORY, spec_hash
 
 NOW = 1800000000
@@ -15,7 +15,10 @@ def environment():
                 BUILD_RESULT='success', IMAGE_DIGEST='sha256:' + 'b' * 64,
                 CD_PROFILE='ACTIVATION', CD_ENABLED='true', CD_SSH_TUNNEL_APPROVED='true',
                 CD_EXPECTED_REF='refs/tags/v1.0.2', CD_EXPECTED_SHA='a' * 40,
-                CD_EXPECTED_AUDIENCE='synthetic-api-audience')
+                CD_EXPECTED_AUDIENCE='synthetic-api-audience',
+                KUBE_TOKEN='synthetic-unit-token-not-a-credential', KUBE_CA_B64='synthetic-unit-ca',
+                SSH_KNOWN_HOSTS='synthetic-unit-host-key', SSH_HOST='synthetic-ssh.invalid',
+                SSH_USER='cd-tunnel', API_TLS_NAME='synthetic-api.invalid', APP_URL='https://synthetic-app.invalid/')
 
 
 def deployment():
@@ -35,6 +38,7 @@ def evidence(now=NOW):
             'sha': env['GITHUB_SHA'], 'run_id': env['GITHUB_RUN_ID'], 'attempt': 1,
             'digest': env['IMAGE_DIGEST'], 'environment': 'diploma-production',
             'observed_at': now - 5, 'approved_at': now - 2,
+            'authorization_expires_at': now + 240,
             'reviewer': 'synthetic-reviewer', 'trigger_actor': 'synthetic-author',
             'checks': {key: True for key in CHECKS},
             'scope': {'namespace': 'default', 'deployment': 'diploma-app',
@@ -43,6 +47,7 @@ def evidence(now=NOW):
                       'verbs': ['get', 'patch', 'list', 'watch']},
             'token_expires_at': now + 1200, 'job_deadline': now + 600,
             'token_audience': env['CD_EXPECTED_AUDIENCE'],
+            'credential_commitments': credential_commitments(env),
             'baseline': {'uid': document['metadata']['uid'], 'resource_version': '10',
                          'generation': 7, 'spec_sha256': spec_hash(document['spec']),
                          'previous_image': REPOSITORY + ':1.0.0',
