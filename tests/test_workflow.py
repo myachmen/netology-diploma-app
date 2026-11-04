@@ -1,101 +1,89 @@
-"""Regression checks on privileged job boundaries, independent of GitHub secrets."""
+"""Workflow routing and security checks, no network or credentials."""
 import itertools
 from pathlib import Path
 import re
 import unittest
 
-from ci.workflow_policy import TERMS, check_workflow, job as policy_job
+from ci.workflow_policy import BUILD_TERMS, TERMS, check_workflow, condition, job
 
-TEXT = (Path(__file__).resolve().parents[1] / '.github/workflows/docker-publish.yml').read_text()
+ROOT = Path(__file__).resolve().parents[1]
+TEXT = (ROOT / '.github/workflows/docker-publish.yml').read_text()
 
 
-def job(name):
-    match = re.search(r'^  ' + re.escape(name) + r':\n(.*?)(?=^  [a-zA-Z][\w-]*:|\Z)', TEXT, re.M | re.S)
-    if not match:
-        raise AssertionError('Missing job ' + name)
-    return match[1]
+def evaluate(expression, values):
+    expression = expression.replace('&&', ' and ').replace('||', ' or ')
+    for key, value in sorted(values.items(), key=lambda p: -len(p[0])):
+        expression = expression.replace(key, repr(value))
+    return eval(expression, {'__builtins__': {}, 'false': False}, {})
 
 
 class WorkflowSecurity(unittest.TestCase):
-    def test_deploy_cannot_run_even_with_all_approvals(self):
-        self.assertTrue(check_workflow(TEXT, 'PREPARATION'))
-        deploy = job('deploy')
-        condition = re.search(r'^    if: >-\n((?:      .*\n)+)', deploy, re.M)[1]
-        # A literal false joined only by AND is false for EVERY runtime context.
-        # Reject OR or a moved/missing kill switch, even with all other gates true.
-        self.assertTrue(condition.lstrip().startswith('false &&'))
-        self.assertNotIn('||', condition)
-        self.assertNotIn('always()', condition)
-        self.assertIn('github.event_name == \'push\'', condition)
-        self.assertIn('github.ref_type == \'tag\'', condition)
-        self.assertIn('environment: diploma-production', deploy)
-        self.assertIn('cancel-in-progress: false', deploy)
-
-    def test_future_activation_fixture_retains_every_security_conjunct(self):
-        fixture = TEXT.replace('      false &&\n', '', 1).replace('CD_PROFILE: PREPARATION', 'CD_PROFILE: ACTIVATION')
-        self.assertTrue(check_workflow(fixture, 'ACTIVATION'))
+    def test_current_and_future_release_profile(self):
+        # Removing ONE documented preparation switch must not break the tests.
+        self.assertIn(check_workflow(TEXT), ('PREPARATION', 'RELEASE'))
+        active = TEXT.replace('      false &&\n', '', 1)
+        self.assertEqual(check_workflow(active), 'RELEASE')
+        prep = active.replace("      github.repository ==", "      false &&\n      github.repository ==", 1)
+        # A false in the build condition is not the deploy preparation switch.
         with self.assertRaises(ValueError):
-            check_workflow(fixture, 'PREPARATION')
-        with self.assertRaises(ValueError):
-            check_workflow(TEXT, 'ACTIVATION')
+            check_workflow(prep)
         for term in TERMS:
-            block = policy_job(fixture, 'deploy')
+            block = job(active, 'deploy')
             with self.subTest(missing=term), self.assertRaises(ValueError):
-                check_workflow(fixture.replace(block, block.replace(term, 'true', 1), 1), 'ACTIVATION')
-        for old, new in [('environment: diploma-production', 'environment: other'),
-                         ('cancel-in-progress: false', 'cancel-in-progress: true'),
-                         ('timeout-minutes: 10', 'timeout-minutes: 0')]:
-            with self.subTest(boundary=old), self.assertRaises(ValueError):
-                check_workflow(fixture.replace(old, new), 'ACTIVATION')
+                check_workflow(active.replace(block, block.replace(term, 'true', 1), 1))
+        for term in BUILD_TERMS:
+            block = job(active, 'build-and-push')
+            with self.subTest(build_missing=term), self.assertRaises(ValueError):
+                check_workflow(active.replace(block, block.replace(term, 'true', 1), 1))
 
-    def test_unpinned_action_is_rejected_in_both_profiles(self):
+    def test_push_and_tag_paths_and_untrusted_events(self):
+        active = TEXT.replace('      false &&\n', '', 1)
+        for repo, event, ref, attempt, success in itertools.product(
+                ['myachmen/netology-diploma-app', 'fork/app'],
+                ['push', 'pull_request', 'pull_request_target', 'workflow_dispatch', 'workflow_run'],
+                ['refs/heads/main', 'refs/heads/ordinary-feature',
+                 'refs/heads/feature/diploma-minimal-cd-142', 'refs/tags/v1.0.2'],
+                [1, 2], [True, False]):
+            publish = repo == 'myachmen/netology-diploma-app' and event == 'push' and ref != 'refs/heads/feature/diploma-minimal-cd-142'
+            values = {'github.repository': repo, 'github.event_name': event,
+                      'github.ref_type': 'tag' if ref.startswith('refs/tags/') else 'branch',
+                      'github.ref': ref, 'github.run_attempt': attempt,
+                      'needs.test.result': 'success' if success else 'failure',
+                      "needs['build-and-push'].result": 'success' if success else 'failure',
+                      "needs['build-and-push'].outputs.release": 'true' if ref.startswith('refs/tags/') else 'false'}
+            with self.subTest(repo=repo, event=event, ref=ref, attempt=attempt, success=success):
+                self.assertEqual(evaluate(condition(job(TEXT, 'build-and-push')), values), publish)
+                expected = publish and success and ref.startswith('refs/tags/') and attempt == 1
+                self.assertEqual(evaluate(condition(job(active, 'deploy')), values), expected)
+                if check_workflow(TEXT) == 'PREPARATION':
+                    self.assertFalse(evaluate(condition(job(TEXT, 'deploy')), values))
+
+    def test_permissions_pins_and_source_digest_binding(self):
+        self.assertIn('permissions:\n  contents: read', TEXT)
+        test = job(TEXT, 'test')
+        self.assertNotIn('secrets.', test)
+        self.assertIn('persist-credentials: false', test)
+        self.assertIn('ref: ${{ github.sha }}', job(TEXT, 'deploy'))
+        self.assertIn("IMAGE_DIGEST: ${{ needs['build-and-push'].outputs.digest }}", TEXT)
+        self.assertIn('org.opencontainers.image.revision=${{ steps.release.outputs.sha }}', TEXT)
+        self.assertIn('org.opencontainers.image.version=${{ steps.release.outputs.version }}', TEXT)
+        self.assertIn('git merge-base --is-ancestor', TEXT)
         action = re.search(r'uses: ([^\s#]+)', TEXT)[1]
         with self.assertRaises(ValueError):
-            check_workflow(TEXT.replace(action, 'actions/checkout@v4'), 'PREPARATION')
+            check_workflow(TEXT.replace(action, 'actions/checkout@v4'))
+        block = job(TEXT, 'deploy')
+        with self.assertRaises(ValueError):
+            check_workflow(TEXT.replace(block, block.replace(' &&', ' ||', 1), 1))
 
-    def test_untrusted_and_preparation_events_cannot_publish(self):
-        condition = re.search(r'^    if: >-\n((?:      .*\n)+)', job('build-and-push'), re.M)[1]
-        # Evaluate this small, fixed grammar as a truth table, not a hand-copied policy.
-        expression = ' '.join(condition.split()).replace('&&', ' and ').replace('||', ' or ')
-        for repo, event, ref in itertools.product(
-                ['myachmen/netology-diploma-app', 'untrusted/fork'],
-                ['push', 'pull_request', 'pull_request_target', 'workflow_dispatch', 'workflow_run'],
-                ['refs/heads/main', 'refs/heads/feature/diploma-ci-cd-prep-137',
-                 'refs/heads/feature/diploma-ci-cd-fixes-139',
-                 'refs/heads/feature/diploma-cd-access-gates-140', 'refs/tags/v1.0.0']):
-            values = {'github.repository': repo, 'github.event_name': event, 'github.ref': ref}
-            rendered = expression
-            for key, value in values.items():
-                rendered = rendered.replace(key, repr(value))
-            actual = eval(rendered, {'__builtins__': {}, 'startsWith': lambda s, p: s.startswith(p)}, {})
-            expected = repo == 'myachmen/netology-diploma-app' and event == 'push' and ref in ('refs/heads/main', 'refs/tags/v1.0.0')
-            with self.subTest(repo=repo, event=event, ref=ref):
-                self.assertEqual(actual, expected)
-
-    def test_test_gate_has_no_privileged_access(self):
-        test = job('test')
-        self.assertNotIn('secrets.', test)
-        self.assertNotIn('environment:', test)
-        self.assertNotIn('write', test)
-        self.assertIn('needs: test', job('build-and-push'))
-        self.assertNotIn('pull_request_target:', TEXT)
-        self.assertNotIn('workflow_run:', TEXT)
-        self.assertNotIn('id-token:', TEXT)
-        self.assertIn('permissions:\n  contents: read', TEXT)
-        self.assertIn('persist-credentials: false', test)
-        self.assertNotIn('--insecure', TEXT)
-
-    def test_release_manifest_is_only_a_trusted_release_build_step(self):
-        build = job('build-and-push')
-        self.assertIn('name: Record immutable release manifest', build)
-        self.assertIn('name: Upload immutable release manifest', build)
-        self.assertEqual(build.count("if: steps.release.outputs.valid == 'true'"), 2)
-        self.assertIn('name: cd-release-${{ github.run_id }}-${{ github.run_attempt }}', build)
-        self.assertIn('overwrite: false', build)
-        self.assertIn('path: ${{ runner.temp }}/cd-release.json', build)
-        self.assertNotIn('upload-artifact', job('test'))
-        self.assertNotIn('upload-artifact', job('deploy'))
-
-
-if __name__ == '__main__':
-    unittest.main()
+    def test_script_has_one_guarded_mutation_and_strict_connection(self):
+        text = (ROOT / 'ci/deploy.sh').read_text()
+        self.assertEqual(len(re.findall(r'^kubectl .* patch deployment', text, re.M)), 1)
+        self.assertLess(text.index('python3 -m ci.release --credentials'), text.index('ssh -F'))
+        self.assertLess(text.index('python3 -m ci.deployment patch'), text.index('kubectl --request-timeout=30s -n default patch'))
+        for required in ('StrictHostKeyChecking=yes', 'IdentityAgent=none', 'GlobalKnownHostsFile=/dev/null',
+                         '127.0.0.1:17643:127.0.0.1:6443', "'tls-server-name'", '--timeout=180s',
+                         'python3 -m ci.deployment reply', 'python3 -m ci.deployment final',
+                         'unset SSH_PRIVATE_KEY SSH_KNOWN_HOSTS KUBE_CA_B64 KUBE_TOKEN', 'trap cleanup EXIT'):
+            self.assertIn(required, text)
+        for forbidden in ('--insecure', 'skip-tls-verify', 'rollout undo', 'helm ', 'set image', '--retry'):
+            self.assertNotIn(forbidden, text)

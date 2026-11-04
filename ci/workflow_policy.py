@@ -1,13 +1,15 @@
-"""Static PREPARATION/ACTIVATION policy; no network, YAML dependency or execution."""
+"""Small offline checker for the diploma workflow's privileged boundaries."""
 import re
 
+BUILD_TERMS = {
+    "github.repository == 'myachmen/netology-diploma-app'",
+    "github.event_name == 'push'",
+    "github.ref != 'refs/heads/feature/diploma-minimal-cd-142'"}
 TERMS = {
     "github.repository == 'myachmen/netology-diploma-app'",
     "github.event_name == 'push'", "github.ref_type == 'tag'", "github.run_attempt == 1",
-    'github.ref == vars.CD_EXPECTED_REF', 'github.sha == vars.CD_EXPECTED_SHA',
     "needs.test.result == 'success'", "needs['build-and-push'].result == 'success'",
-    "needs['build-and-push'].outputs.release == 'true'",
-    "vars.CD_ENABLED == 'true'", "vars.CD_SSH_TUNNEL_APPROVED == 'true'"}
+    "needs['build-and-push'].outputs.release == 'true'"}
 
 
 def job(text, name):
@@ -24,31 +26,35 @@ def condition(block):
     return ' '.join(match[1].split())
 
 
-def check_workflow(text, profile):
-    if profile not in ('PREPARATION', 'ACTIVATION'):
-        raise ValueError('Unknown policy profile')
-    deploy = job(text, 'deploy')
-    expression = condition(deploy)
-    expected = TERMS | ({'false'} if profile == 'PREPARATION' else set())
+def conjuncts(expression, expected):
     terms = expression.split(' && ')
     if set(terms) != expected or len(terms) != len(expected):
-        raise ValueError('Deployment condition violates fail-closed policy')
-    if profile == 'PREPARATION' and not expression.startswith('false && '):
-        raise ValueError('Preparation kill switch is missing')
-    required = ('environment: diploma-production', 'timeout-minutes: 10',
-                'cancel-in-progress: false', 'CD_PROFILE: ' + profile,
-                'run: bash ci/deploy.sh', 'contents: read')
-    if not all(item in deploy for item in required):
-        raise ValueError('Missing deployment scope/approval/profile boundary')
-    if 'pull_request_target:' in text or 'workflow_run:' in text or 'id-token:' in text:
-        raise ValueError('Untrusted trigger/permission')
-    test = job(text, 'test')
+        raise ValueError('Unsafe job condition')
+
+
+def check_workflow(text):
+    deploy, build, test = (job(text, name) for name in ('deploy', 'build-and-push', 'test'))
+    expression = condition(deploy)
+    preparation = expression.startswith('false && ')
+    conjuncts(expression, TERMS | ({'false'} if preparation else set()))
+    conjuncts(condition(build), BUILD_TERMS)
+    if not all(item in deploy for item in ('timeout-minutes: 10', 'cancel-in-progress: false',
+                                          'run: bash ci/deploy.sh', 'contents: read')):
+        raise ValueError('Missing bounded deployment boundary')
+    if 'needs: [test, build-and-push]' not in deploy or 'needs: test' not in build:
+        raise ValueError('Missing test/build dependency')
     if 'secrets.' in test or 'environment:' in test or 'write' in test:
         raise ValueError('Privileged test job')
-    if 'needs: test' not in job(text, 'build-and-push'):
-        raise ValueError('Test gate bypass')
+    if any(item in text for item in ('pull_request_target:', 'workflow_run:', 'workflow_dispatch:',
+                                    'id-token:', 'contents: write')):
+        raise ValueError('Untrusted trigger or excess permission')
+    if any(item in text for item in ('APH-CD/1', 'CD_EXPECTED_', 'CD_GITHUB_READ_TOKEN',
+                                    'CD_PROFILE', 'CD_ENABLED', 'environment:')):
+        raise ValueError('Obsolete mandatory admission dependency')
+    if "branches: ['**']" not in text or "tags: ['v*.*.*']" not in text:
+        raise ValueError('Push/tag coverage missing')
     actions = re.findall(r'uses: ([^\s#]+)', text)
     if not actions or any(not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}', action)
                           for action in actions):
         raise ValueError('Action is not pinned to a commit')
-    return True
+    return 'PREPARATION' if preparation else 'RELEASE'

@@ -1,15 +1,71 @@
-"""Fail-closed same-run release contract; no network or credential handling."""
+"""Minimal same-run release and build metadata; no GitHub policy API/admission."""
 import argparse
-import json
 import os
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
+
+REPOSITORY = 'myachmen/netology-diploma-app'
+IMAGE = 'cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app'
+PREPARATION_REF = 'refs/heads/feature/diploma-minimal-cd-142'
+VERSION = r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)'
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def build_metadata(env, version):
+    """Own-repository pushes only; prep142 is explicitly test-only until approved."""
+    require(env.get('GITHUB_REPOSITORY') == REPOSITORY and env.get('GITHUB_EVENT_NAME') == 'push',
+            'Only own-repository push may publish')
+    require(re.fullmatch(VERSION, version), 'Invalid application version')
+    sha, ref = env.get('GITHUB_SHA', ''), env.get('GITHUB_REF', '')
+    require(re.fullmatch('[0-9a-f]{40}', sha), 'Invalid commit')
+    run = env.get('GITHUB_RUN_ID', '')
+    require(re.fullmatch('[1-9][0-9]*', run), 'Invalid run')
+    require(ref != PREPARATION_REF, 'Preparation branch is test-only')
+    release = env.get('GITHUB_REF_TYPE') == 'tag'
+    if release:
+        require(ref == 'refs/tags/v' + version, 'Tag/version mismatch')
+    else:
+        require(env.get('GITHUB_REF_TYPE') == 'branch' and ref.startswith('refs/heads/') and
+                bool(ref.removeprefix('refs/heads/')), 'Invalid branch push')
+    tags = [IMAGE + ':sha-' + sha]
+    if release:
+        tags.append(IMAGE + ':' + version)
+    elif ref == 'refs/heads/main':
+        tags.append(IMAGE + ':latest')
+    return {'valid': str(release).lower(), 'sha': sha, 'tag': 'v' + version if release else '',
+            'run': run, 'version': version, 'tags': '\n'.join(tags)}
+
+
+def validate_credentials(env):
+    """Check presence/shape before external commands; never print values."""
+    import base64
+    names = ('SSH_PRIVATE_KEY', 'SSH_KNOWN_HOSTS', 'KUBE_CA_B64', 'KUBE_TOKEN',
+             'SSH_HOST', 'SSH_USER', 'API_TLS_NAME', 'APP_URL')
+    for name in names:
+        value = env.get(name)
+        require(isinstance(value, str) and bool(value.strip()) and '\0' not in value,
+                'Missing/invalid credential or configuration: ' + name)
+    require(env['SSH_USER'] == 'cd-tunnel', 'Dedicated cd-tunnel identity required')
+    for name in ('SSH_HOST', 'API_TLS_NAME'):
+        require(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.-]*', env[name]), 'Invalid endpoint configuration')
+    require(re.fullmatch(r'[A-Za-z0-9_.-]+', env['KUBE_TOKEN']), 'Invalid scoped token format')
+    try:
+        require(bool(base64.b64decode(env['KUBE_CA_B64'], validate=True)), 'Empty CA')
+        url = urlsplit(env['APP_URL'])
+        require(url.scheme in ('http', 'https') and url.hostname and not url.username and
+                not url.password and not url.query and not url.fragment and url.path == '/',
+                'Invalid application URL')
+        _ = url.port
+    except (ValueError, UnicodeError):
+        raise ValueError('Invalid CA or application URL configuration') from None
 
 
 def validate(env):
-    def require(condition, message):
-        if not condition:
-            raise ValueError(message)
     require(env.get("GITHUB_REPOSITORY") == "myachmen/netology-diploma-app", "Wrong repository")
     require(env.get("GITHUB_EVENT_NAME") == "push", "Only a release tag push is eligible")
     require(env.get("GITHUB_REF_TYPE") == "tag", "Not a tag")
@@ -29,22 +85,28 @@ def validate(env):
 
 
 if __name__ == "__main__":
-    # Direct script execution needs the repository root for the ci namespace.
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from ci.activation import authorize_execution
     parser = argparse.ArgumentParser()
-    parser.add_argument('--authorization-output', required=True, type=Path)
+    parser.add_argument('--build-output', type=Path)
+    parser.add_argument('--credentials', action='store_true')
     args = parser.parse_args()
     try:
-        proof = authorize_execution(os.environ)
-        # Only authenticated GitHub admission may reach this output.
-        # There is deliberately no input-JSON/test-provider CLI option.
-        fd = os.open(args.authorization_output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, 'w') as output:
-            json.dump(proof, output)
-        print("Authenticated activation contract PASS")
+        if args.build_output:
+            require(not args.credentials, 'Conflicting options')
+            version = (Path(__file__).resolve().parent / 'VERSION').read_text().strip()
+            metadata = build_metadata(os.environ, version)
+            with args.build_output.open('a') as output:
+                for key, value in metadata.items():
+                    if key == 'tags':
+                        output.write('tags<<IMAGES\n' + value + '\nIMAGES\n')
+                    else:
+                        output.write(key + '=' + value + '\n')
+            print('Build metadata PASS')
+        else:
+            validate(os.environ)
+            if args.credentials:
+                validate_credentials(os.environ)
+            print('Same-run release contract PASS')
     except ValueError as exc:
         raise SystemExit("Release gate FAIL: " + str(exc)) from None
-    except (KeyError, TypeError, AttributeError, UnicodeError, OSError):
-        raise SystemExit('Release gate FAIL: BLOCKED malformed/unavailable admission; no retry') from None
+    except (KeyError, TypeError, UnicodeError, OSError):
+        raise SystemExit('Release gate FAIL: invalid/unavailable configuration; no retry') from None

@@ -1,16 +1,11 @@
-
-name: Build and Publish Docker Image
+name: Diploma CI/CD
 
 on:
   push:
-    branches:
-      - main
-      - feature/diploma-cd-access-gates-140
-    tags:
-      - 'v[0-9]*.[0-9]*.[0-9]*'
+    branches: ['**']
+    tags: ['v*.*.*']
   pull_request:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,21 +15,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified upstream ref
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Offline application and release security tests
+      - name: Offline application and release tests
         run: |
           python3 ci/smoke.py
           python3 -m unittest discover -s tests -v
 
   build-and-push:
     needs: test
-    # Preparation branch / PR / dispatch runs test only, without registry secrets.
+    # Task142 publication must be test-only. Other trusted branch/tag pushes publish.
     if: >-
       github.repository == 'myachmen/netology-diploma-app' &&
       github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+      github.ref != 'refs/heads/feature/diploma-minimal-cd-142'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -44,111 +39,44 @@ jobs:
       source_tag: ${{ steps.release.outputs.tag }}
       source_run: ${{ steps.release.outputs.run }}
       app_version: ${{ steps.release.outputs.version }}
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified upstream ref
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
-          persist-credentials: false
           fetch-depth: 0
-
-      - name: Identify and validate release provenance
+          persist-credentials: false
+      - name: Validate source and image tags
         id: release
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="$(cat ci/VERSION)"
-          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          valid=false
-          if [[ "$REF_TYPE" == tag ]]; then
-            [[ "$REF_NAME" == "v$version" ]]
+          python3 -m ci.release --build-output "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
-            valid=true
-          else
-            [[ "$GITHUB_REF" == refs/heads/main ]]
           fi
-          {
-            echo "valid=$valid"
-            echo "sha=$GITHUB_SHA"
-            echo "tag=$REF_NAME"
-            echo "run=$GITHUB_RUN_ID"
-            echo "version=$version"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3, verified upstream ref
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3, verified upstream ref
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login to Yandex Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3, verified upstream ref
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Login to existing Yandex Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: cr.yandex
           username: json_key
           password: ${{ secrets.YC_SA_KEY_JSON }}
-
-      - name: Generate Docker image tags
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5, verified upstream ref
-        with:
-          images: |
-            yamarkya/netology-diploma-app
-            cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app
-          flavor: |
-            latest=false
-          tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=semver,pattern={{version}}
-            type=sha,format=long
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.release.outputs.version }}
-            org.opencontainers.image.source=https://github.com/myachmen/netology-diploma-app
-            io.github.actions.run-id=${{ github.run_id }}
-
-      - name: Build and push Docker image
+      - name: Build and push exact source
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6, verified upstream ref
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
           provenance: false
           sbom: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.release.outputs.tags }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.release.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+            org.opencontainers.image.source=https://github.com/myachmen/netology-diploma-app
+            io.github.actions.run-id=${{ github.run_id }}
 
-      - name: Record immutable release manifest
-        if: steps.release.outputs.valid == 'true'
-        env:
-          BUILD_RESULT: success
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-          APP_VERSION: ${{ steps.release.outputs.version }}
-          SOURCE_SHA: ${{ steps.release.outputs.sha }}
-          SOURCE_TAG: ${{ steps.release.outputs.tag }}
-          SOURCE_RUN: ${{ steps.release.outputs.run }}
-        run: python3 -m ci.build_manifest "$RUNNER_TEMP/cd-release.json"
-
-      - name: Upload immutable release manifest
-        if: steps.release.outputs.valid == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4, verified upstream
-        with:
-          name: cd-release-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/cd-release.json
-          if-no-files-found: error
-          overwrite: false
-          retention-days: 1
-
-  # PREPARATION ONLY. Literal false is mandatory until separate user approval.
-  # An environment name is a future configuration reference, not proof of approvals.
+  # PREPARATION: remove only literal false after explicit live-release approval.
   deploy:
     needs: [test, build-and-push]
     if: >-
@@ -156,12 +84,9 @@ jobs:
       github.repository == 'myachmen/netology-diploma-app' &&
       github.event_name == 'push' && github.ref_type == 'tag' &&
       github.run_attempt == 1 &&
-      github.ref == vars.CD_EXPECTED_REF && github.sha == vars.CD_EXPECTED_SHA &&
       needs.test.result == 'success' &&
       needs['build-and-push'].result == 'success' &&
-      needs['build-and-push'].outputs.release == 'true' &&
-      vars.CD_ENABLED == 'true' && vars.CD_SSH_TUNNEL_APPROVED == 'true'
-    environment: diploma-production
+      needs['build-and-push'].outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -170,53 +95,38 @@ jobs:
       group: diploma-app-production
       cancel-in-progress: false
     steps:
-      - name: Checkout trusted release commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified upstream ref
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-
       - name: Install verified kubectl v1.33.7
-        shell: bash
         run: |
           set -euo pipefail
-          [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || exit 1
+          [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]
           download_dir="$(mktemp -d)"
           trap 'rm -rf -- "$download_dir"' EXIT
           cd "$download_dir"
           base_url='https://dl.k8s.io/release/v1.33.7/bin/linux/amd64'
           curl --fail --silent --show-error --location \
             --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --connect-timeout 15 --max-time 60 --retry 1 --retry-max-time 120 \
-            --output kubectl "$base_url/kubectl"
+            --connect-timeout 15 --max-time 60 --output kubectl "$base_url/kubectl"
           curl --fail --silent --show-error --location \
             --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --connect-timeout 10 --max-time 15 --retry 1 --retry-max-time 30 \
-            --output kubectl.sha256 "$base_url/kubectl.sha256"
+            --connect-timeout 10 --max-time 15 --output kubectl.sha256 "$base_url/kubectl.sha256"
           checksum="$(cat kubectl.sha256)"
-          [[ "$checksum" =~ ^[0-9a-fA-F]{64}$ ]] || exit 1
+          [[ "$checksum" =~ ^[0-9a-fA-F]{64}$ ]]
           printf '%s  kubectl\n' "$checksum" | sha256sum --check --strict
-          install_dir="$RUNNER_TEMP/diploma-cd-bin"
-          mkdir -p "$install_dir"
-          install -m 0755 kubectl "$install_dir/kubectl"
-          printf '%s\n' "$install_dir" >> "$GITHUB_PATH"
-
-      - name: Deploy same-run immutable digest (DISABLED job)
-        shell: bash
+          mkdir -p "$RUNNER_TEMP/diploma-cd-bin"
+          install -m 0755 kubectl "$RUNNER_TEMP/diploma-cd-bin/kubectl"
+          printf '%s\n' "$RUNNER_TEMP/diploma-cd-bin" >> "$GITHUB_PATH"
+      - name: Deploy this run digest and verify application
         env:
-          CD_PROFILE: PREPARATION
-          CD_GITHUB_READ_TOKEN: ${{ secrets.CD_GITHUB_READ_TOKEN }}
-          CD_EXPECTED_REF: ${{ vars.CD_EXPECTED_REF }}
-          CD_EXPECTED_SHA: ${{ vars.CD_EXPECTED_SHA }}
-          CD_EXPECTED_AUDIENCE: ${{ vars.CD_EXPECTED_AUDIENCE }}
           BUILD_RESULT: ${{ needs['build-and-push'].result }}
           IMAGE_DIGEST: ${{ needs['build-and-push'].outputs.digest }}
           SOURCE_SHA: ${{ needs['build-and-push'].outputs.source_sha }}
           SOURCE_TAG: ${{ needs['build-and-push'].outputs.source_tag }}
           SOURCE_RUN: ${{ needs['build-and-push'].outputs.source_run }}
           APP_VERSION: ${{ needs['build-and-push'].outputs.app_version }}
-          CD_ENABLED: ${{ vars.CD_ENABLED }}
-          CD_SSH_TUNNEL_APPROVED: ${{ vars.CD_SSH_TUNNEL_APPROVED }}
           SSH_HOST: ${{ vars.CD_SSH_HOST }}
           SSH_USER: ${{ vars.CD_SSH_USER }}
           API_TLS_NAME: ${{ vars.CD_API_TLS_NAME }}
