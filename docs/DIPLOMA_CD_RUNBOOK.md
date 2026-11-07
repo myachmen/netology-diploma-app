@@ -172,3 +172,50 @@ Nonzero helper вызывает существующий ERR stage=ssh_api_acces
 После разрешённого merge потребуется отдельное решение владельца о следующем
 production запуске/новой версии и tag SHA. Не запускать helper вручную против
 production в рамках offline проверки PR.
+
+## №193 — отдельный deploy-only recovery исходной сборки #26
+
+Только подготовка PR; merge и фактический invocation требуют отдельных решений.
+`.github/workflows/recover-diploma-193.yml` не подписан на push/tag/PR: только
+owner workflow_dispatch на main, attempt1, с точным подтверждением
+`RECOVER_42372499463_v1.0.4`. Это не разрешение нажать Run workflow сейчас.
+
+Origin фиксирован: run42372499463/attempt1, v1.0.4,
+source fc62b598de874c2d3c95b8963e73cc7392696f67,
+image sha256:a5bf2975580120f2ffdf8a848e425d38d96b2d572dee3e999914189a80e00764.
+В №193 authenticated metadata/log reads подтвердили test/build success и deploy
+API_AUTH_401 на ssh_api_access до patch. Attempt2 overall success с skipped deploy
+не используется как доказательство успешного CD. Токен повторно не читался.
+
+Перед любым SSH/API доступом helper заново читает только GitHub: exact origin
+attempt1 metadata/jobs, build/deploy job logs, неизменность tag ref. Требуются
+contents:read + actions:read, без actions:write/PAT/settings changes. Digest обязан
+однозначно совпасть в original containerimage.digest и resolved deploy inputs;
+оригинальные job IDs/statuses, SHA/tag/run/version и pre-patch boundary обязательны.
+Missing/masked/ambiguous/mismatched/expired provenance → STOP. Логи не печатаются
+и не сохраняются; HTTP exceptions redacted, response cap1MiB/request timeout20s,
+без retry. На signed log redirect Authorization не пересылается.
+
+После proof создаётся local manifest mode0600, связанный с текущими execution
+run_id/control SHA. Execution run_id не подменяется на origin_build_run_id.
+`ci.contract` вызывает отдельный recovery validator только при CD_RECOVERY=origin-26;
+обычный `ci.release` и его attempt1/tag-only контракт неизменны. Manifest и все
+передаваемые source/digest поля повторно проверяются перед SSH и guarded patch.
+Жёстко закреплённый digest в YAML — проверяемое ожидание, не замена live GitHub proof.
+Не передавать пользовательский digest или arbitrary source run.
+
+Используется тот же ci/deploy.sh: свежий read-only API/Deployment baseline,
+строгие SSH+CA/SNI, существующий RBAC/target, ровно один atomic digest patch,
+rollout/HTTP exact version checks и cleanup. Неизвестный write outcome → STOP,
+без rerun/undo/repair. Recovery не получает registry writer credentials и ничего
+не собирает/публикует. Concurrency groups общие с tag workflow; параллельного
+writer нет. Manifest удаляется always-step, SSH/temp credentials — прежним cleanup.
+
+Порядок владельца: отдельно разрешить merge exact PR head (main вызовет обычный
+image build/push, deploy skipped); проверить main CI; отдельно разрешить один
+manual recovery на exact merged control SHA с вышеуказанным origin/digest.
+Не создавать новый tag/release и не rerun старый #26. Recovery rerun запрещён;
+новый dispatch после неопределённой записи тоже не разрешён — сначала согласованная
+read-only reconciliation. Новый origin/версия требуют нового review, код не универсален.
+Current API/cluster health, token validity, capacity и stopped worker не проверялись
+в №193; успешный deployment не обещается. Сетевые/SSH/RBAC изменения не входят.

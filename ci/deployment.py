@@ -80,7 +80,7 @@ def main():
     parser.add_argument('--patch-output', type=Path)
     args = parser.parse_args()
     if args.command == 'patch':
-        from ci.release import validate
+        from ci.contract import validate
         validate(os.environ)
         require(args.digest == os.environ['IMAGE_DIGEST'], 'Digest/build mismatch')
         require(args.patch_output is not None, 'Missing patch output')

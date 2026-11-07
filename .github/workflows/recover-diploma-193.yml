@@ -1,0 +1,80 @@
+name: Approved deploy-only recovery 193
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Owner-approved original #26 recovery: RECOVER_42372499463_v1.0.4'
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: diploma-app-run-production
+  cancel-in-progress: false
+jobs:
+  recover:
+    if: >-
+      github.repository == 'myachmen/netology-diploma-app' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.actor == 'myachmen' && github.triggering_actor == 'myachmen' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: diploma-app-production
+      cancel-in-progress: false
+    env:
+      RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify original attempt1 provenance before deployment credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m ci.recovery --verify
+      - name: Install verified kubectl v1.33.7
+        run: |
+          set -euo pipefail
+          [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]
+          download_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$download_dir"' EXIT
+          cd "$download_dir"
+          base_url='https://dl.k8s.io/release/v1.33.7/bin/linux/amd64'
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 60 --output kubectl "$base_url/kubectl"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 15 --output kubectl.sha256 "$base_url/kubectl.sha256"
+          checksum="$(cat kubectl.sha256)"
+          [[ "$checksum" =~ ^[0-9a-fA-F]{64}$ ]]
+          printf '%s  kubectl\n' "$checksum" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/diploma-cd-bin"
+          install -m 0755 kubectl "$RUNNER_TEMP/diploma-cd-bin/kubectl"
+          printf '%s\n' "$RUNNER_TEMP/diploma-cd-bin" >> "$GITHUB_PATH"
+      - name: Deploy only the verified original digest
+        env:
+          CD_RECOVERY: origin-26
+          ORIGIN_BUILD_RUN_ID: '42372499463'
+          EXECUTION_RUN_ID: ${{ github.run_id }}
+          BUILD_RESULT: success
+          IMAGE_DIGEST: sha256:a5bf2975580120f2ffdf8a848e425d38d96b2d572dee3e999914189a80e00764
+          SOURCE_SHA: fc62b598de874c2d3c95b8963e73cc7392696f67
+          SOURCE_TAG: v1.0.4
+          SOURCE_RUN: '42372499463'
+          APP_VERSION: 1.0.4
+          SSH_HOST: ${{ vars.CD_SSH_HOST }}
+          SSH_USER: ${{ vars.CD_SSH_USER }}
+          API_TLS_NAME: ${{ vars.CD_API_TLS_NAME }}
+          APP_URL: ${{ vars.CD_APP_URL }}
+          SSH_PRIVATE_KEY: ${{ secrets.CD_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.CD_SSH_KNOWN_HOSTS }}
+          KUBE_CA_B64: ${{ secrets.CD_KUBE_CA_B64 }}
+          KUBE_TOKEN: ${{ secrets.CD_KUBE_TOKEN }}
+        run: bash ci/deploy.sh
+      - name: Remove local provenance
+        if: always()
+        run: python3 -m ci.recovery --cleanup
