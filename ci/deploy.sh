@@ -7,7 +7,11 @@ umask 077
 # Fail before key/config files, SSH or kubectl when provenance/config is missing.
 stage=release_gate
 trap 'rc=$?; printf "CD FAIL stage=%s exit=%s; STOP, no retry/rollback\n" "$stage" "$rc" >&2' ERR
-python3 -m ci.release --credentials
+if [[ -n "${CD_RECOVERY:-}" ]]; then
+  python3 -m ci.contract --credentials
+else
+  python3 -m ci.release --credentials
+fi
 work_dir="$(mktemp -d)"
 tunnel_pid=''
 cleanup() {
