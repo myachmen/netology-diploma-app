@@ -4,7 +4,8 @@ import re
 BUILD_TERMS = {
     "github.repository == 'myachmen/netology-diploma-app'",
     "github.event_name == 'push'",
-    "github.ref != 'refs/heads/feature/diploma-minimal-cd-142'"}
+    "github.run_attempt == 1",
+    "(github.ref == 'refs/heads/main' || github.ref_type == 'tag')"}
 TERMS = {
     "github.repository == 'myachmen/netology-diploma-app'",
     "github.event_name == 'push'", "github.ref_type == 'tag'", "github.run_attempt == 1",
@@ -53,6 +54,8 @@ def check_workflow(text):
         raise ValueError('Obsolete mandatory admission dependency')
     if "branches: ['**']" not in text or "tags: ['v*.*.*']" not in text:
         raise ValueError('Push/tag coverage missing')
+    if "group: diploma-app-run-${{ github.ref_type == 'tag' && 'production' || github.ref }}" not in text:
+        raise ValueError('Missing complete release serialization')
     actions = re.findall(r'uses: ([^\s#]+)', text)
     if not actions or any(not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}', action)
                           for action in actions):

@@ -44,7 +44,7 @@ class WorkflowSecurity(unittest.TestCase):
                 ['refs/heads/main', 'refs/heads/ordinary-feature',
                  'refs/heads/feature/diploma-minimal-cd-142', 'refs/tags/v1.0.2'],
                 [1, 2], [True, False]):
-            publish = repo == 'myachmen/netology-diploma-app' and event == 'push' and ref != 'refs/heads/feature/diploma-minimal-cd-142'
+            publish = repo == 'myachmen/netology-diploma-app' and event == 'push' and attempt == 1 and (ref == 'refs/heads/main' or ref.startswith('refs/tags/'))
             values = {'github.repository': repo, 'github.event_name': event,
                       'github.ref_type': 'tag' if ref.startswith('refs/tags/') else 'branch',
                       'github.ref': ref, 'github.run_attempt': attempt,
