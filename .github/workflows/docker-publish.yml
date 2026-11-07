@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# Serialize the complete tag build/deploy/smoke; feature CI never shares this writer.
+concurrency:
+  group: diploma-app-run-${{ github.ref_type == 'tag' && 'production' || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -25,11 +30,12 @@ jobs:
 
   build-and-push:
     needs: test
-    # Task142 publication must be test-only. Other trusted branch/tag pushes publish.
+    # Feature pushes and PRs are offline; only main or release tags may publish.
     if: >-
       github.repository == 'myachmen/netology-diploma-app' &&
       github.event_name == 'push' &&
-      github.ref != 'refs/heads/feature/diploma-minimal-cd-142'
+      github.run_attempt == 1 &&
+      (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -75,8 +81,17 @@ jobs:
             org.opencontainers.image.version=${{ steps.release.outputs.version }}
             org.opencontainers.image.source=https://github.com/myachmen/netology-diploma-app
             io.github.actions.run-id=${{ github.run_id }}
+      - name: Record immutable build evidence
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE: ${{ steps.release.outputs.sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'Build commit `%s` / version `%s` / digest `%s`\n' "$SOURCE" "$VERSION" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
 
-  # Local release candidate: publish to main only after exact SHA/version approval.
+  # Only a separately approved release tag can reach the existing deployment.
   deploy:
     needs: [test, build-and-push]
     if: >-

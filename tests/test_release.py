@@ -18,19 +18,19 @@ class BuildMetadata(unittest.TestCase):
             env.update(APP_VERSION=version, GITHUB_REF='refs/tags/v' + version, SOURCE_TAG='v' + version)
             tag = build_metadata(env, version)
             self.assertEqual(tag['valid'], 'true')
-            self.assertEqual(tag['tags'].splitlines(), [IMAGE + ':sha-' + 'a' * 40, IMAGE + ':' + version])
+            self.assertEqual(tag['tags'].splitlines(), [IMAGE + ':sha-' + 'a' * 40 + '-run-' + env['GITHUB_RUN_ID']])
             self.assertEqual(tag['sha'], env['GITHUB_SHA'])
             self.assertEqual(tag['run'], env['GITHUB_RUN_ID'])
             main = build_metadata(dict(env, GITHUB_REF_TYPE='branch', GITHUB_REF='refs/heads/main'), version)
             self.assertEqual(main['valid'], 'false')
-            self.assertEqual(main['tags'].splitlines(), [IMAGE + ':sha-' + 'a' * 40, IMAGE + ':latest'])
-            feature = build_metadata(dict(env, GITHUB_REF_TYPE='branch', GITHUB_REF='refs/heads/normal-feature'), version)
-            self.assertEqual(feature['tags'].splitlines(), [IMAGE + ':sha-' + 'a' * 40])
+            self.assertEqual(main['tags'].splitlines(), [IMAGE + ':sha-' + 'a' * 40 + '-run-' + env['GITHUB_RUN_ID']])
+            with self.assertRaisesRegex(ValueError, 'test-only'):
+                build_metadata(dict(env, GITHUB_REF_TYPE='branch', GITHUB_REF='refs/heads/normal-feature'), version)
 
     def test_untrusted_invalid_and_preparation_cannot_publish(self):
         for key, value in [('GITHUB_REPOSITORY','fork/app'), ('GITHUB_EVENT_NAME','pull_request'),
                            ('GITHUB_EVENT_NAME','workflow_dispatch'), ('GITHUB_SHA','invalid'),
-                           ('GITHUB_RUN_ID',''), ('GITHUB_REF','refs/tags/v9.0.0'),
+                           ('GITHUB_RUN_ID',''), ('GITHUB_RUN_ATTEMPT','2'), ('GITHUB_REF','refs/tags/v9.0.0'),
                            ('GITHUB_REF','refs/tags/v01.0.2')]:
             with self.subTest(key=key), self.assertRaises(ValueError):
                 build_metadata(dict(environment(), **{key:value}), '1.0.2')

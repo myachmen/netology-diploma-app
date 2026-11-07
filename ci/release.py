@@ -7,7 +7,6 @@ from urllib.parse import urlsplit
 
 REPOSITORY = 'myachmen/netology-diploma-app'
 IMAGE = 'cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app'
-PREPARATION_REF = 'refs/heads/feature/diploma-minimal-cd-142'
 VERSION = r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)'
 
 
@@ -17,7 +16,7 @@ def require(condition, message):
 
 
 def build_metadata(env, version):
-    """Own-repository pushes only; prep142 is explicitly test-only until approved."""
+    """Own main/tag pushes once; feature branches cannot publish."""
     require(env.get('GITHUB_REPOSITORY') == REPOSITORY and env.get('GITHUB_EVENT_NAME') == 'push',
             'Only own-repository push may publish')
     require(re.fullmatch(VERSION, version), 'Invalid application version')
@@ -25,18 +24,15 @@ def build_metadata(env, version):
     require(re.fullmatch('[0-9a-f]{40}', sha), 'Invalid commit')
     run = env.get('GITHUB_RUN_ID', '')
     require(re.fullmatch('[1-9][0-9]*', run), 'Invalid run')
-    require(ref != PREPARATION_REF, 'Preparation branch is test-only')
+    require(env.get('GITHUB_RUN_ATTEMPT') == '1', 'Rerun publication forbidden')
     release = env.get('GITHUB_REF_TYPE') == 'tag'
     if release:
         require(ref == 'refs/tags/v' + version, 'Tag/version mismatch')
     else:
-        require(env.get('GITHUB_REF_TYPE') == 'branch' and ref.startswith('refs/heads/') and
-                bool(ref.removeprefix('refs/heads/')), 'Invalid branch push')
-    tags = [IMAGE + ':sha-' + sha]
-    if release:
-        tags.append(IMAGE + ':' + version)
-    elif ref == 'refs/heads/main':
-        tags.append(IMAGE + ':latest')
+        require(env.get('GITHUB_REF_TYPE') == 'branch' and ref == 'refs/heads/main',
+                'Feature branches are test-only')
+    # Unique run-bound tag; no mutable latest/version alias. Deploy only by digest.
+    tags = [IMAGE + ':sha-' + sha + '-run-' + run]
     return {'valid': str(release).lower(), 'sha': sha, 'tag': 'v' + version if release else '',
             'run': run, 'version': version, 'tags': '\n'.join(tags)}
 

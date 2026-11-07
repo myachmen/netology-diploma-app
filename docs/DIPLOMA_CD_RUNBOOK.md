@@ -1,209 +1,130 @@
-# Минимальный CI/CD диплома — подготовка №142, кандидат №143
+# Диплом: один tag → image → rollout → HTTP
 
-**Локальный кандидат №143: version1.0.2 / LIVE CD UNVERIFIED.** Исходная ветка `feature/diploma-minimal-cd-142`
-происходит от prep140 `c67945fcda701d188c1e42d5a856b51cf9d7773d`.
-В №142 разрешались только код, offline checks, test-only CI и публикация ветки.
-Для №143 действуют отдельные явные разрешения пользователя; эта инструкция
-не выдаёт новых прав. Main/registry publish/tag/CD требуют отдельного SHA approval.
-Release/main/tag действия ниже остаются проектом до отдельного подтверждения;
-подготовленные доступы отражены в датированном срезе143, не обещают постоянный health.
+Кандидат №189: версия **1.0.3**. Реализация живёт в
+`myachmen/netology-diploma-app`; infrastructure/Terraform pipeline находится в
+`myachmen/netology-devops-from-zero-homeworks` и этим PR не меняется.
+Это подготовка к отдельному решению владельца: PR не означает разрешение merge,
+создания тега, запуска CD или текущую готовность Kubernetes.
 
-Срез143 от2026-11-04: через trusted control-plane проверены3 Ready Nodes,
-18/18 системных Pods, app2/2 и HTTP200 через Service/ALB. Создан dedicated cd-tunnel
-с проверенными restrictions и named SA/Role/Binding; actual scoped get/list/watch
-и positive/negative authorization прошли. Один supervised forwarding закрыт.
-Private материалы для ручного UI placement подготовлены вне Git; GitHub placement
-ещё не подтверждён. Актуальный expiry токена — в защищённом handoff metadata/отчёте,
-не в этой инструкции. Publisher права YC_SA_KEY_JSON и реальный release ещё не доказаны.
-Public SSH worker-2 не использовался; его stale local binding оставлен без изменения.
+## Единственный workflow
 
-## Что делает workflow
+`.github/workflows/docker-publish.yml`:
 
-| Событие после интеграции | Действие |
-|---|---|
-| Push обычной ветки приложения | Tests → Docker build/push в существующий YCR: `sha-<40hex commit>`; для main также `latest` |
-| Push именно подготовительной ветки №142 | Только tests, **без build/push/deploy** — исключение для безопасной публикации этого задания |
-| Pull request в main | Только tests, без Secrets и deployment |
-| Новый tag `vX.Y.Z` | Tests → проверить tag=ci/VERSION, HTML version, checkout SHA и ancestry main → build/push `X.Y.Z` и `sha-SHA` с OCI version/revision labels → deploy digest **этого же run** → rollout/HTTP smoke |
-
-В локальном candidate diff удалён только выключатель `false &&`; remote main
-пока остаётся выключенным. До отдельного подтверждения actual SHA/version
-кандидат не публикуется. Его обычная feature-ветка при push запустила бы registry
-build, поэтому хранить этот commit локально. После согласования — одно
-fast-forward обновление main и только затем согласованный новый tag;
-tests принимают как disabled, так и корректный release profile. Нет обязательных
-CD flags, environment/reviewer, APH-CD/1, policy token/observer, GitHub policy API
-reads или artifact admission. APH/1.1 для обмена заданиями остаётся неизменным.
-Старый механизм140 удалён из текущего кода, но сохраняется в Git history.
-Workflow не имеет dispatch и не развёртывает branch/PR; attempt>1 не deploy.
-
-Тесты — offline HTML/Docker-context contract и release/security tests, не реальная
-сборка контейнера. При будущем разрешённом push Docker Buildx выполняет настоящий
-build/push. Registry выбран один: **Yandex Container Registry**; он уже используется
-работающим приложением. Дополнительный Docker Hub login/publish для диплома не нужен.
-
-## Существующие ресурсы и точный scope
-
-- App repo: `myachmen/netology-diploma-app`, целевой main; подготовка только новая
-  feature-ветка. Main ещё прежний; локальный candidate1.0.2 подготовлен, реальная интеграция не выполнена.
-- Image: `cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app`.
-  Registry и pull access уже использовались исторически; текущая работоспособность
-  и права publisher/puller в142 не проверялись. IAM и pull Secret не менять.
-- Existing Kubernetes v1.33.7: namespace `default`, Deployment/container
-  `diploma-app`, две реплики. Service/Ingress/Traefik/ALB остаются существующими.
-  CD меняет только image одного контейнера; не выполняет apply Helm/manifests.
-- Existing control-plane `k8s-control-1`: SSH22 → только `127.0.0.1:6443` API.
-  Runner слушает только `127.0.0.1:17643`. Public endpoints и SAN здесь не публикуются.
-- Dedicated identity: SSH `cd-tunnel`, Kubernetes SA/Role/RoleBinding
-  `default/github-actions-deployer` из
-  [RBAC139](https://github.com/myachmen/netology-devops-from-zero-homeworks/blob/8f57aebf85b088279a9314735d5fb31474c58cb8/kubernetes/cd/rbac.yaml).
-  В143 этот scope создан и проверен фактическими authorization tests; повторно
-  применять без сверки не требуется. Наличие YAML само по себе этого не доказывает.
-- [SSH role](https://github.com/myachmen/netology-devops-from-zero-homeworks/blob/6c80ea5f1e099c3199c2896562c23bebda04117b/ansible/roles/cd_tunnel/README.md)
-  — review-only, не activation playbook. Не применять её как готовый account setup.
-
-GitHub-hosted ephemeral runner через существующий SSH — минимальный кандидат,
-в срезе143 route/CA/RBAC и dedicated credentials проверены. Перед релизом нужны
-короткий fresh gate, действительный token и подтверждённый GitHub placement.
-Admin kubeconfig, ключ ubuntu,
-Terraform/IAM identity не используются как shortcut. Если имеющийся маршрут
-небезопасен/недоступен — STOP. Один простой альтернативный вариант: доверенный
-оператор на существующей management машине выполняет тот же scoped digest deploy.
-Это не доказывает автоматический tag CD; автоматизацию через private ephemeral
-runner нужно согласовать отдельно, а не устанавливать постоянный admin runner.
-
-## Минимальные GitHub Secrets и variables — значения не читать в логи
-
-Для этого учебного workflow достаточно repository scope; environment/required
-reviewers/branch protection — желательные controls, **не обязательные gates**.
-Владельцы repo write считаются доверенными: они могут менять privileged workflow.
-Токены/SSH ключи не передаются PR job, checkout не сохраняет credentials.
-
-| Имя | Назначение / минимальные права |
-|---|---|
-| Secret `YC_SA_KEY_JSON` | Уже используемое имя build credential, доступность/права UNKNOWN. Только publish в существующий app registry (`container-registry.images.pusher` на нужном registry либо эквивалентный достаточный existing scope), не cloud admin. Ничего не выпускать и не менять IAM в142 |
-| Secret `CD_SSH_PRIVATE_KEY` | Dedicated key только пользователя cd-tunnel; не ключ администратора. Если его нет — отдельное явное согласие на создание/хранение/ротацию |
-| Secret `CD_SSH_KNOWN_HOSTS` | Только подтверждённая привязка current control-plane host→host key; StrictHostKeyChecking=yes, не accept-new, не global known_hosts |
-| Secret `CD_KUBE_CA_B64` | Existing доверенная CA API, base64; integrity важна, не создавать новую CA или отключать TLS |
-| Secret `CD_KUBE_TOKEN` | Short-lived scoped SA token; не admin client certificate/kubeconfig, не вечный legacy token Secret |
-| Variable `CD_SSH_HOST` | Подтверждённый control-plane SSH endpoint, не новая VM/порт/SG |
-| Variable `CD_SSH_USER` | Ровно `cd-tunnel` |
-| Variable `CD_API_TLS_NAME` | Existing подтверждённый API SAN; при loopback connection сохраняется проверка CA/имени |
-| Variable `CD_APP_URL` | Existing ALB URL `http(s)://host[:port]/`, без credentials/query/fragment. HTTP допустим оригиналом диплома; HTTPS не отключает TLS verification |
-
-`GITHUB_TOKEN` — только `contents: read`. GitHub read-policy token, App private
-key, Secrets write permissions или IAM credentials deploy job не нужны.
-Значения не извлекать из GitHub для проверки; owner выполняет provisioning по
-отдельному разрешению. Не выводить env, raw kubeconfig/Deployment, `set -x`/SSH debug.
-Не upload рабочий каталог deploy job: он содержит credential files/runtime data.
-
-## Минимальный SSH и Kubernetes доступ — на отдельное согласование
-
-SSH: отдельный непривилегированный cd-tunnel, без sudo/password/exec/PTY/SFTP,
-agent/X11/reverse/streamlocal/tunnel forwarding. Разрешён local TCP forwarding
-только `PermitOpen 127.0.0.1:6443`, `MaxSessions 0`, publickey-only, root-owned
-keyfile без user write; ограничение также на самом key. Перед одним разрешённым
-sshd reload проверить **полную** конфигурацию `sshd -t/-T` с Include/Match/PAM и
-сохранением ubuntu access. Наличие шаблона или local listener не заменяет
-effective config и negative channel tests. SG/firewall/public API не расширять.
-
-Kubernetes: SA automount=false, Role/Binding только default, единственное правило:
-`apps/deployments`, `resourceNames: [diploma-app]`, `get,patch,list,watch`.
-Для list/watch нужен field-selector `metadata.name=diploma-app`; закреплённый
-kubectl rollout status использует его. Нет Secrets/Pods/exec/proxy/nodes/RBAC/token
-write permissions. Перед release отдельно подтвердить actual get/filtered
-list/watch, can-i patch и отрицательную authorization matrix для другого
-имени/namespace/Secret/exec/token. Для deny тестов использовать can-i/SSAR,
-не читать настоящий Secret. Не давать CI impersonation/cluster-admin для теста.
-
-RBAC patch не ограничивает JSON поля: украденный token может изменить весь
-Pod template named Deployment. Для учебного проекта требуется принятие этого
-остаточного риска, а не заявление «image-only RBAC». Наш клиент делает один
-image replace с atomic preconditions, но это не серверный admission controller.
-
-Scoped TokenRequest выполняет уполномоченный operator, не сам deployer. Практично
-одно release окно≤45min и token с actual server TTL порядка60min, выданный перед
-окном; проверить audience/API authentication и достаточный остаток на build+deploy
-с запасом. Requested TTL не гарантирует server TTL. Значение хранить защищённо и
-не логировать. Истёкший credential → FAIL/STOP, не admin fallback/auto reissue.
-Отзыв временного доступа/Secret cleanup согласовать заранее; token expiration
-не откатывает уже принятый image patch.
-
-## Как получить первый live release — минимальное следующее согласование
-
-**В142 ни один из этих runtime/credential/settings/merge/tag шагов не выполняется.**
-
-| Необходимое действие | Сейчас | Оператор / разрешение | Риск и verification |
+| Событие | Offline tests | Registry build/push | Kubernetes deploy |
 |---|---|---|---|
-| Короткий current identity/strict host-key/TLS и scoped access gate | PASS в срезе143; перед release проверить freshness/expiry | Infrastructure owner; bounded read-only probes и, если нужен, один собственный временный forwarding | Mismatch/новый network scope → STOP; existing API readyz/get, отрицательные auth tests, cleanup |
-| Restricted SSH account/key + SA/Role/RoleBinding | Созданы и actual tests PASS в143 | Не повторять setup; только сверить actual state | Сохранён ubuntu, один validated reload; direct public SSH worker-2 не требуется |
-| Названные Secrets/vars и scoped token | Защищённые handoff files готовы; GitHub placement PENDING | Repo owner вручную вносит4 CD Secrets/4 vars; YC_SA_KEY_JSON без изменения | Existing authenticated scope проверен; actual expiry/remaining перед release, no logs |
-| Reviewed main integration + version HTML/ci/VERSION, например1.0.2 | Main старый, local candidate1.0.2 | Maintainer + пользователь разрешают merge и registry build/push side effect | Offline tests и разрешённый main CI success; новый commit SHA, labels/tags/digest |
-| Activation + один новый release tag | Remote main false; local candidate готов; v1.0.0/v1.0.1 уже существуют | Пользователь утверждает удаление только false, exact main SHA/version и ОДИН tag/run; maintainer обычный tag push, no force | Непосредственно проверить свободное имя Git/registry, не перемещать старые tags. Tag SHA/version/main ancestry → test/build/digest/deploy |
+| Feature push / PR в main | Да | Нет | Нет |
+| Push main | Да | Да, отдельный run-bound tag | Нет |
+| Push `vX.Y.Z` | Да | Только exact `ci/VERSION` и commit из main | Да, только digest этой сборки |
+| Fork / dispatch / rerun | Нет допуска к публикации | Нет | Нет |
 
-Branch protection/environment/reviewer/APh policy observer не добавлять как
-обязательные препятствия. При неопределённом результате mutation не rerun job
-или весь workflow. Разрешение на повтор/repair/rollback — отдельное решение.
-Доступ и один release можно согласовать в одном функциональном задании с этими
-точными scope/STOP/cleanup; не требуется отдельная цепочка production-grade задач.
+PR workflow не получает secrets. Writer jobs требуют собственный репозиторий,
+push, attempt=1; build допускает только main/tag, deploy только tag после test/build.
+SHA checkout закреплён на event SHA; Actions закреплены на commit SHA;
+GITHUB_TOKEN имеет только contents:read. Проверка ancestry выполняется до login/build.
+Неправильный semver или tag/version mismatch останавливает сборку до registry write.
 
-## Исполнение release и проверки
+Image repository сохранён: `cr.yandex/crpb1oihnpa2uai8m3mp/netology-diploma-app`.
+Единственный image tag — `sha-<40-char-commit>-run-<run_id>`: повторные попытки
+публикации запрещены, `latest`/перезаписываемый version alias не создаётся.
+Registry-side immutable enforcement не настраивается и не заявляется.
+В Deployment передаётся **только `repository@sha256:<digest>`** из этого же run,
+не mutable tag. OCI labels и Job Summary связывают version/tag/SHA/run/digest.
+Complete tag workflow сериализован через `diploma-app-run-production`; cancel=false.
+Дополнительно сохранён прежний deploy job lock `diploma-app-production`
+(имя отличается от workflow lock во избежание самоблокировки). Не запускать другие writers вручную.
+GitHub concurrency не является durable очередью: более двух параллельных событий
+могут вытеснить pending run. Поэтому владелец согласует только один релиз за раз.
 
-1. До tag: существующие кластер/app/route healthy, scoped auth/strict SSH/TLS PASS,
-   две app replicas, предыдущий image и для возможного rollback **реальный прежний
-   immutable digest** зафиксирован уполномоченным оператором без secrets. При
-   старом tagged image не считать registry tag доказательством Pod imageID.
-2. Version в ci/VERSION и HTML должны совпадать, candidate v1.0.2 не создавать
-   до отдельного разрешения. Reviewed activation commit должен быть в main.
-3. Обычный push commit выполняет test/build/push; tag vVERSION выполняет то же
-   с version tag/OCI labels. Digest берётся из build outputs этого же run, а не
-   input/mutable tag. Pipeline не имеет произвольного deploy dispatch.
-4. Скрипт проверяет event/repo/tag/version/SHA/run/attempt/build/digest и наличие
-   конфигурации до network/credential files. Проверка формата не подтверждает
-   реальные права/TTL; это делает короткий разрешённый access gate.
-5. После strict SSH forwarding — bounded readiness GET; fresh Deployment GET,
-   valid existing image repo/container/replicas/ready; JSON patch: tests UID/RV/
-   generation/replicas/container/old image, **один replace immutable digest**.
-   Drift между GET/patch даёт конфликт, не автоматический второй patch.
-6. Проверяются exact reply UID/generation/spec, rollout≤180s, final generation
-   и2 updated/ready/available replicas. Затем public app HTTP200 и exact expected
-   HTML/version. HTTP endpoint не получает kube credentials. Никаких automatic
-   restart/rollback/repair. Job≤10min, API/SSH/HTTP timeouts ограничены.
-7. При FAIL/timeout/unknown outcome остановиться, read-only выяснить фактический
-   результат. Перед повтором/rollback необходимо решение пользователя.
-   EXIT/TERM cleanup закрывает только собственный tunnel/tempdir; SIGKILL/runner
-   loss не гарантирует trap. Подтвердить освобождение17643 и expiry/revoke
-   временных credentials по согласованному плану.
+## Существующий ограниченный доступ
 
-### Rollback — только вручную после отдельного разрешения
+GitHub-hosted runner → strict SSH `cd-tunnel` на существующем control-plane →
+локальный forwarding API `127.0.0.1:6443`. API не открывается наружу.
+Отдельные SSH key/known_hosts, IdentitiesOnly, IdentityAgent=none,
+StrictHostKeyChecking=yes; глобальное доверие не меняется, accept-new запрещён.
+Kubeconfig в mode0600 tempdir использует CA и tls-server-name, без insecure flags.
+Существующий SA/Role/RoleBinding `default/github-actions-deployer` ограничен
+get/patch/list/watch **Deployment `default/diploma-app`**; новых прав/Secrets нет.
+Доступ, identity, актуальность ключей, RBAC и сертификатов — owner prerequisites,
+а не текущие подтверждённые факты №189.
 
-Не выполнять `rollout undo` вслепую и не выбирать mutable tag. Сначала read-only
-проверить actual current UID/generation/spec; подготовить guarded patch на
-сохранённый `YCR_IMAGE@sha256:PREVIOUS_DIGEST`, затем один согласованный patch и
-тот же rollout/HTTP-version postcheck. Если прежний digest или write outcome
-UNKNOWN — STOP, не угадывать. RBAC grant/credential cleanup отдельно от rollback
-приложения; не удалять app, Secrets/SA/Binding автоматически.
+Нужны существующие GitHub Repository Secrets **только с такими именами**:
 
-## Offline checks и evidence диплома
+- `YC_SA_KEY_JSON` — существующий registry writer, не создавать IAM credentials;
+- `CD_SSH_PRIVATE_KEY`, `CD_SSH_KNOWN_HOSTS` — только restricted cd-tunnel;
+- `CD_KUBE_CA_B64`, `CD_KUBE_TOKEN` — доверенный API CA и scoped ServiceAccount token.
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 ci/smoke.py
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
-actionlint .github/workflows/docker-publish.yml
-bash -n ci/deploy.sh
-```
+Repository Variables: `CD_SSH_HOST`, `CD_SSH_USER` (ровно `cd-tunnel`),
+`CD_API_TLS_NAME`, `CD_APP_URL` (существующий публичный ALB root URL).
+Значения передаются владельцем через GitHub UI; не помещать их в Git/чат/логи.
+Не использовать admin kubeconfig или SSH admin key. Перед будущим запуском
+владелец должен обеспечить актуальный scoped token и проверить его фактические
+exp/audience/subject и TTL с запасом на build+deploy; старое наличие Secret
+не доказывает действительность токена. №189 значений не читает и не меняет.
 
-Тесты проверяют current/next version, main/feature/tag metadata, event/job routing,
-PR/fork/dispatch denial, отсутствие credentials до external commands, exact digest,
-atomic conflict и postchecks. Synthetic credentials не годятся для реального
-подключения. Offline checks не заявлять как live build/deploy.
+Workflow использует существующие repository secrets, без обязательного нового
+Environment или второго пользователя. Settings/branch/tag protections не меняются.
+Если владелец вводит Environment, до тега нужно отдельно согласовать workflow
+`environment` и соответствующую область secrets/vars, ограничить deployment tags;
+просто создать Environment и считать jobs защищёнными им нельзя. По текущему
+варианту контроль — отдельно одобренный merge и один release tag на согласованном
+main SHA, плюс неизменные guards. Владельцу не следует выдавать untrusted authors
+право менять workflow или создавать production tags.
 
-Для сдачи сохранить ссылки/скриншоты **реальных** main build и tag run: immutable
-commit/tag, tests/build success, YCR version/revision labels и digest, successful
-deploy/rollout/HTTP+new version. Не публиковать private endpoints/keys/tokens/
-raw runtime JSON. CI UI доступен по HTTPS GitHub Actions. В142 test-only run
-закрывает лишь подготовку кода; end-to-end CD остаётся LIVE UNVERIFIED.
+## Что именно делает deployment
 
-Оригинал: [диплом Нетологии](https://github.com/netology-code/devops-diplom-yandexcloud/blob/cd2a878c96cf9852c5226be6f9bba4d221cfe634/README.md).
-Terraform pipeline/Atlantis/Terraform Cloud и итоговые evidence сдачи — отдельные
-обязательные этапы, этим приложением не реализованы. Никакого автоматического №143.
+1. Проверяет same-run SHA/tag/version/digest и обязательную конфигурацию до SSH.
+2. Создаёт защищённые временные файлы и один forwarding; GET named Deployment
+   до 10 попыток с request timeout5s и sleep1s, без мутаций.
+3. Читает baseline: правильные namespace/name/container/repository, ровно 2 готовые
+   реплики, актуальный observedGeneration; no-op digest прекращает запуск.
+4. Выполняет **один** atomic JSON patch с тестами UID/resourceVersion/generation/
+   replicas/container/old image; меняет только image. Конфликт/timeout → STOP.
+5. Проверяет ответ, `rollout status --timeout=180s`, затем final generation,
+   неизменность остального spec, exact digest и 2 updated/ready/available replicas.
+6. С runner делает реальный GET `CD_APP_URL`: 5 попыток максимум, curl connect5s /
+   total15s, subprocess17s, sleep5s между попытками. HTTP200 **и HTML exact version**
+   обязательны; redirects не следуются; body ограничен64KiB. Retry только чтения,
+   не patch/build/release. Лимит helper <=105s с учётом subprocess watchdog.
+7. Всегда закрывает свой SSH forwarding и удаляет temp key/kubeconfig/body.
+   При ошибке сообщает этап/exit и STOP без deployment retry или rollback.
+
+Успешный rollout при failed HTTP smoke — **failed CD**, а не повод повторять patch.
+При неизвестном результате мутации сначала отдельная read-only reconciliation
+после согласования; никаких rerun/undo/reset/repair/force.
+
+## Границы доказательств
+
+Исторический tag v1.0.2 на cc81c800d84b995aef26eb99e31bdac3bacd331c:
+[run41910789234](https://github.com/myachmen/netology-diploma-app/actions/runs/41910789234)
+build/push/rollout состоялись, HTTP runner timeout дал итог FAILURE. Отчёт №147
+подтвердил HTTP200 из management/control-plane, но не из runner; причина timeout
+осталась UNKNOWN. Bounded retries помогают только временному сбою, не устраняют
+неподтверждённую сетевую причину и не обходят проверку. В №148 новая диагностика
+была остановлена из-за branch-push registry side effects; №189 устраняет этот
+подтверждённый дефект маршрутизации workflow.
+
+№189 не вызывает SSH, Cloud API, Kubernetes или registry. worker-2 по owner UI
+остановлена как preemptible VM; её запуск не разрешён. Capacity/Ready/ALB health,
+runner reachability, current credentials и успешный end-to-end остаются UNKNOWN.
+Terraform automation считается завершённым по существующим evidence №188;
+не запускать дополнительную Terraform диагностику для app release.
+
+## Один следующий шаг владельца
+
+Рассмотреть этот draft PR и отдельно разрешить merge **его точного head SHA**.
+Merge сам запускает main image build/push: это тоже требует разрешения.
+После merge и успешного CI — отдельное разрешение **одного** нового тега `v1.0.3`
+на точном итоговом main SHA (squash SHA отличается от feature SHA), без tag movement.
+Перед этим ограниченная актуальная проверка существующих identity/trust,
+Nodes/capacity/app2Ready/ALB и restricted access/RBAC/token TTL; если требуются
+запуск VM, изменение сети или credentials — отдельное разрешение, не обход.
+Не создавать уже существующий тег; при неожиданном состоянии STOP.
+
+Ожидаемые acceptance evidence первого разрешённого tag run:
+exact tag/ref/SHA/run attempt1 → successful tests → build/push → run-bound image tag
+и sha256digest → единственный patch → Ready rollout2/2 → runner HTTP200 и Version1.0.3
+→ зелёный run + Job Summary и обезличенные screenshots. Не выдавать offline tests
+за live evidence. Возможны обычные Actions/registry traffic/storage расходы;
+новых облачных ресурсов нет. После failed tag run — STOP, без автоматического
+повторного релиза или отката. Следующий runtime/monitoring/сдаваемый README milestone
+не входит в №189.
