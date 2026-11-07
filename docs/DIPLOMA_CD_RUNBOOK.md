@@ -1,6 +1,7 @@
 # Диплом: один tag → image → rollout → HTTP
 
-Кандидат №189: версия **1.0.3**. Реализация живёт в
+Историческая подготовка №189: версия **1.0.3**. Тег v1.0.3 уже существует;
+его run #19 завершился на API access до patch (дополнение №190 ниже). Реализация живёт в
 `myachmen/netology-diploma-app`; infrastructure/Terraform pipeline находится в
 `myachmen/netology-devops-from-zero-homeworks` и этим PR не меняется.
 Это подготовка к отдельному решению владельца: PR не означает разрешение merge,
@@ -74,7 +75,8 @@ main SHA, плюс неизменные guards. Владельцу не след
 
 1. Проверяет same-run SHA/tag/version/digest и обязательную конфигурацию до SSH.
 2. Создаёт защищённые временные файлы и один forwarding; GET named Deployment
-   до 10 попыток с request timeout5s и sleep1s, без мутаций.
+   до 10 попыток с request timeout5s / process watchdog7s и sleep1s, без мутаций.
+   Точные неизменяемые ошибки прекращают gate раньше; budget не более79s.
 3. Читает baseline: правильные namespace/name/container/repository, ровно 2 готовые
    реплики, актуальный observedGeneration; no-op digest прекращает запуск.
 4. Выполняет **один** atomic JSON patch с тестами UID/resourceVersion/generation/
@@ -113,7 +115,7 @@ Terraform automation считается завершённым по сущест
 
 Рассмотреть этот draft PR и отдельно разрешить merge **его точного head SHA**.
 Merge сам запускает main image build/push: это тоже требует разрешения.
-После merge и успешного CI — отдельное разрешение **одного** нового тега `v1.0.3`
+После merge и успешного CI — отдельное разрешение **одного** нового тега/версии, которые владелец согласует отдельно
 на точном итоговом main SHA (squash SHA отличается от feature SHA), без tag movement.
 Перед этим ограниченная актуальная проверка существующих identity/trust,
 Nodes/capacity/app2Ready/ALB и restricted access/RBAC/token TTL; если требуются
@@ -122,9 +124,51 @@ Nodes/capacity/app2Ready/ALB и restricted access/RBAC/token TTL; если тр�
 
 Ожидаемые acceptance evidence первого разрешённого tag run:
 exact tag/ref/SHA/run attempt1 → successful tests → build/push → run-bound image tag
-и sha256digest → единственный patch → Ready rollout2/2 → runner HTTP200 и Version1.0.3
+и sha256digest → единственный patch → Ready rollout2/2 → runner HTTP200 и exact согласованная версия
 → зелёный run + Job Summary и обезличенные screenshots. Не выдавать offline tests
 за live evidence. Возможны обычные Actions/registry traffic/storage расходы;
 новых облачных ресурсов нет. После failed tag run — STOP, без автоматического
 повторного релиза или отката. Следующий runtime/monitoring/сдаваемый README milestone
 не входит в №189.
+
+
+## №190 — redacted visibility в API access gate
+
+[Tag run #19](https://github.com/myachmen/netology-diploma-app/actions/runs/42368899602)
+на v1.0.3 / main 01f17484f042b860aa31923d27c30b24324e3333:
+test/build success, deploy API access failure **до baseline/patch**.
+ROOT_CAUSE_UNPROVEN: подавленный kubectl stderr и удалённый SSH error file
+не позволяют отличить token/RBAC/TLS/forwarding/server failure. Не связывать
+это с прежним HTTP timeout или stopped worker без доказательств.
+
+`ci/api_access.py` заменяет только существующий GET polling. Дополнительных
+Cloud/SSH/socket/HTTP probes нет, SSH process не перезапускается. На каждой
+неудаче в log идут только attempt, allowlisted category, running/exited, exit code:
+
+- SSH_HOST_KEY_FAILURE / SSH_AUTH_FAILURE / SSH_LOCAL_BIND_FAILURE /
+  SSH_FORWARD_FAILURE / SSH_CONNECT_TIMEOUT / SSH_NETWORK_FAILURE /
+  SSH_PROCESS_EXITED;
+- API_TLS_FAILURE / API_AUTH_401 / API_RBAC_403 / API_NOT_FOUND_404;
+- API_TIMEOUT / API_CONNECTION_FAILURE / API_UNKNOWN;
+- LOCAL_TOOL_ERROR / LOCAL_DIAGNOSTIC_ERROR, POLL_BUDGET_EXHAUSTED.
+
+Это категории совпадений с диагностическими сообщениями, не самостоятельное
+доказательство root cause. Локальная и удалённая сторона отказа соединения не
+различаются без дополнительных данных: не приписывать API_CONNECTION_FAILURE
+конкретной сети. Полученный API auth/RBAC/TLS ответ приоритетнее старого SSH
+forward error. Если SSH уже завершился, gate не сообщает success даже при GET0.
+
+Только transient API_TIMEOUT/API_CONNECTION_FAILURE повторяются в прежнем
+лимите10; максимум9 delays по1s, watchdog7s/GET, общий budget≤79s. TLS/trust/auth/
+RBAC/notfound/unknown/tool/process failures → immediate STOP. Ни stdout GET,
+ни raw stderr/URL/username/CA/keys/token не выводятся. SSH log читается только
+последними64KiB для классификации; cleanup удаляет private tempdir как раньше.
+Nonzero helper вызывает существующий ERR stage=ssh_api_access; старый явный
+`exit 1` внутри OR-list обходил ERR trap. Никаких новых bypass или repair нет.
+
+№190 не запускал production workflow или live probes. Merge отдельно требует
+согласования: main push по-прежнему выполняет registry build/push, **deploy
+остаётся tag-only**. Не rerun #19, не двигать v1.0.3, не создавать v1.0.4 в №190.
+После разрешённого merge потребуется отдельное решение владельца о следующем
+production запуске/новой версии и tag SHA. Не запускать helper вручную против
+production в рамках offline проверки PR.

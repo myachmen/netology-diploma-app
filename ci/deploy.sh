@@ -48,17 +48,8 @@ ssh -F /dev/null -N -T -i "$work_dir/key" \
   -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
   -L 127.0.0.1:17643:127.0.0.1:6443 "$SSH_USER@$SSH_HOST" 2> "$work_dir/ssh-error" &
 tunnel_pid=$!
-# Bounded read-only readiness polling, never repeat a mutation.
-ready=false
-for attempt in {1..10}; do
-  kill -0 "$tunnel_pid" 2>/dev/null || { echo 'Tunnel exited'; exit 1; }
-  if kubectl --request-timeout=5s -n default get deployment diploma-app -o name >/dev/null 2>&1; then
-    ready=true
-    break
-  fi
-  sleep 1
-done
-[[ "$ready" == true ]] || { echo 'API access failed'; exit 1; }
+# Same bounded read-only GET, redacted categories; never respawn SSH or mutate.
+python3 -m ci.api_access --tunnel-pid "$tunnel_pid" --ssh-error "$work_dir/ssh-error"
 stage=baseline
 kubectl --request-timeout=15s -n default get deployment diploma-app -o json > "$work_dir/baseline.json" 2> "$work_dir/api-error"
 python3 -m ci.deployment patch "$work_dir/baseline.json" "$work_dir/expectation.json" \
